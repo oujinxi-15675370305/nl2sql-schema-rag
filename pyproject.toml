@@ -1,0 +1,17 @@
+[project]
+name = "nl2sql-schema-rag"
+version = "0.1.0"
+description = "NL2SQL with schema retrieval: narrow the schema before generating SQL"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = []
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]

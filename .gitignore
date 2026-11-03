@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 环境与密钥（只提交 .env.example）
+.env
+.env.local
+
+# 数据（演示库由脚本生成）
+data/
+!data/.gitkeep
+
+# 运行产物
+logs/
+*.log
+
+# 编辑器
+.idea/
+.vscode/
+.DS_Store
