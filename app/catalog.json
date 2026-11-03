@@ -1,0 +1,59 @@
+{
+  "tables": [
+    {
+      "name": "orders",
+      "comment": "订单主表，一行一个订单",
+      "synonyms": ["订单", "下单", "交易"],
+      "columns": [
+        {"name": "order_id", "type": "TEXT", "comment": "订单号", "is_dimension": true},
+        {"name": "customer_id", "type": "TEXT", "comment": "客户编号", "is_dimension": true},
+        {"name": "region_id", "type": "INTEGER", "comment": "地区编号", "is_dimension": true},
+        {"name": "order_date", "type": "TEXT", "comment": "下单日期 YYYY-MM-DD", "synonyms": ["下单时间", "日期", "时间"], "is_dimension": true},
+        {"name": "status", "type": "TEXT", "comment": "订单状态 paid/refunded/cancelled", "synonyms": ["状态"], "is_dimension": true},
+        {"name": "pay_amount", "type": "REAL", "comment": "实付金额（元）", "synonyms": ["金额", "实付", "支付金额"], "is_measure": true},
+        {"name": "refund_amount", "type": "REAL", "comment": "退款金额（元）", "synonyms": ["退款"], "is_measure": true},
+        {"name": "cost_amount", "type": "REAL", "comment": "成本金额（元）", "synonyms": ["成本"], "is_measure": true}
+      ]
+    },
+    {
+      "name": "order_items",
+      "comment": "订单明细，一行一个商品",
+      "synonyms": ["明细", "商品明细"],
+      "columns": [
+        {"name": "order_id", "type": "TEXT", "comment": "订单号", "is_dimension": true},
+        {"name": "product_id", "type": "TEXT", "comment": "商品编号", "is_dimension": true},
+        {"name": "quantity", "type": "INTEGER", "comment": "数量", "synonyms": ["件数", "销量"], "is_measure": true},
+        {"name": "unit_price", "type": "REAL", "comment": "单价（元）", "synonyms": ["单价", "价格"], "is_measure": true},
+        {"name": "item_amount", "type": "REAL", "comment": "明细金额（元）", "synonyms": ["行金额"], "is_measure": true}
+      ]
+    },
+    {
+      "name": "products",
+      "comment": "商品主数据",
+      "synonyms": ["商品", "产品", "SKU"],
+      "columns": [
+        {"name": "product_id", "type": "TEXT", "comment": "商品编号", "is_dimension": true},
+        {"name": "product_name", "type": "TEXT", "comment": "商品名称", "synonyms": ["名称", "品名"], "is_dimension": true},
+        {"name": "category", "type": "TEXT", "comment": "商品品类", "synonyms": ["品类", "类目", "分类"], "is_dimension": true},
+        {"name": "brand", "type": "TEXT", "comment": "品牌", "is_dimension": true},
+        {"name": "list_price", "type": "REAL", "comment": "标价（元）", "synonyms": ["标价"], "is_measure": true}
+      ]
+    },
+    {
+      "name": "regions",
+      "comment": "地区维表",
+      "synonyms": ["地区", "区域", "大区"],
+      "columns": [
+        {"name": "region_id", "type": "INTEGER", "comment": "地区编号", "is_dimension": true},
+        {"name": "region_name", "type": "TEXT", "comment": "地区名称（华东/华南/华北/西南）", "synonyms": ["地区名", "大区名"], "is_dimension": true}
+      ]
+    }
+  ],
+  "metrics": [
+    {"name": "gmv", "comment": "成交总额：已支付订单的实付金额之和", "synonyms": ["GMV", "gmv", "成交额", "销售额", "营收", "交易额"], "requires": ["orders.pay_amount"], "sql": "SUM(o.pay_amount)"},
+    {"name": "order_count", "comment": "订单数：已支付订单的数量", "synonyms": ["订单数", "单量", "订单量", "多少单"], "requires": ["orders.order_id"], "sql": "COUNT(DISTINCT o.order_id)"},
+    {"name": "aov", "comment": "客单价：成交总额 / 订单数", "synonyms": ["客单价", "平均订单金额", "均价"], "requires": ["orders.pay_amount"], "sql": "ROUND(SUM(o.pay_amount) * 1.0 / COUNT(DISTINCT o.order_id), 2)"},
+    {"name": "refund_rate", "comment": "退款率：退款订单数 / 已支付订单数", "synonyms": ["退款率", "退货率"], "requires": ["orders.refund_amount"], "sql": "ROUND(SUM(CASE WHEN o.status = 'refunded' THEN 1 ELSE 0 END) * 1.0 / COUNT(DISTINCT o.order_id), 4)"},
+    {"name": "units", "comment": "销量：商品件数之和", "synonyms": ["销量", "件数", "卖了多少件"], "requires": ["order_items.quantity"], "sql": "SUM(i.quantity)"}
+  ]
+}
