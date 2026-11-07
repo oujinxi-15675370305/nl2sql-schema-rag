@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NL2SQL · Schema RAG 智能问数</title>
+  <link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="dot"></span>
+      <strong>NL2SQL Schema RAG</strong>
+      <span class="sub">自然语言 → 检索 schema → 生成 SQL → 校验 → 执行</span>
+    </div>
+    <div class="right">
+      <button id="btn-eval" class="ghost">跑评测</button>
+      <a class="ghost" href="/api/schema" target="_blank">看 schema</a>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="panel input-panel">
+      <label for="q">你的问题</label>
+      <textarea id="q" rows="3" placeholder="例如：上个月各地区的 GMV 是多少？"></textarea>
+      <div class="samples"></div>
+      <button id="btn-run" class="primary">生成并执行</button>
+      <p class="hint">离线模式：不配置 LLM_API_KEY 时用规则生成 SQL；配置后走大模型。</p>
+
+      <div class="panel-block">
+        <h3>命中的 schema</h3>
+        <div id="ctx-metrics" class="tag-row"><span class="muted">指标 —</span></div>
+        <div id="ctx-tables" class="tag-row"><span class="muted">表 —</span></div>
+        <div id="ctx-columns" class="tag-row wrap"><span class="muted">列 —</span></div>
+      </div>
+    </section>
+
+    <section class="panel result-panel">
+      <div class="result-head">
+        <h3>结果</h3>
+        <span id="meta" class="meta"></span>
+      </div>
+      <div id="state" class="state"></div>
+      <div id="table-wrap" class="table-wrap"></div>
+
+      <div class="panel-block">
+        <div class="sql-head">
+          <h3>生成的 SQL</h3>
+          <button id="btn-copy" class="ghost small">复制</button>
+        </div>
+        <pre id="sql" class="sql">—</pre>
+      </div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
