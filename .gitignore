@@ -1,4 +1,4 @@
-# Python
+﻿# Python
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -13,7 +13,7 @@ venv/
 .env.local
 
 # 数据（演示库由脚本生成）
-data/
+data/*
 !data/.gitkeep
 
 # 运行产物
