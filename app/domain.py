@@ -121,3 +121,5 @@ class SQLPlan:
     elapsed_ms: int = 0
     context: SchemaContext | None = None
     keywords: dict[str, list[str]] = field(default_factory=dict)
+    attempts: list[dict] = field(default_factory=list)
+    intent: str = "ask"

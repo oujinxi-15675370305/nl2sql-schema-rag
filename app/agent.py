@@ -191,8 +191,10 @@ def rule_based_sql(question: str, catalog: Catalog, ctx: SchemaContext, keywords
     return sql
 
 
-def llm_sql(question: str, ctx: SchemaContext, catalog: Catalog) -> str | None:
-    """有 key 才走；返回 None 表示回退到规则。"""
+def llm_sql(
+    question: str, ctx: SchemaContext, catalog: Catalog, feedback: str | None = None
+) -> str | None:
+    """有 key 才走；返回 None 表示回退到规则。feedback 是上一次失败的原因。"""
     api_key = os.getenv("LLM_API_KEY", "").strip()
     if not api_key:
         return None
@@ -202,8 +204,10 @@ def llm_sql(question: str, ctx: SchemaContext, catalog: Catalog) -> str | None:
         "你是数据仓库的 SQL 生成器。只能使用下面给出的表和列，禁止编造字段。\n"
         f"可用 schema：\n{ctx.ddl(catalog)}\n\n"
         f"问题：{question}\n"
-        "只输出一条 SELECT 语句，不要解释，不要 markdown。"
     )
+    if feedback:
+        prompt += f"\n上一次生成的 SQL 有问题，请修正后重新生成：\n{feedback}\n"
+    prompt += "只输出一条 SELECT 语句，不要解释，不要 markdown。"
     body = json.dumps(
         {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0}
     ).encode()
@@ -220,6 +224,41 @@ def llm_sql(question: str, ctx: SchemaContext, catalog: Catalog) -> str | None:
         return text
     except Exception:
         return None
+
+
+# ---------- 生成器（可替换，便于测试与接入不同模型） ----------
+class RuleGenerator:
+    """离线规则生成器。不看 feedback：规则改不了自己，靠兜底不是靠重试。"""
+
+    def __call__(self, question: str, ctx: SchemaContext, catalog: Catalog,
+                 feedback: str | None = None) -> str:
+        return rule_based_sql(question, catalog, ctx, extract_keywords(question, catalog))
+
+
+class LLMGenerator:
+    """大模型生成器，失败时把错误带回去重写。没配 key 时退回规则。"""
+
+    def __init__(self, fallback: RuleGenerator | None = None) -> None:
+        self.fallback = fallback or RuleGenerator()
+
+    def __call__(self, question: str, ctx: SchemaContext, catalog: Catalog,
+                 feedback: str | None = None) -> str:
+        sql = llm_sql(question, ctx, catalog, feedback)
+        return sql if sql else self.fallback(question, ctx, catalog, feedback)
+
+
+class ScriptedGenerator:
+    """测试/演示用：按顺序吐出预设 SQL，用来模拟"第一次写错、第二次改对"。"""
+
+    def __init__(self, scripts: list[str]) -> None:
+        self.scripts = list(scripts)
+        self.calls: list[str | None] = []
+
+    def __call__(self, question: str, ctx: SchemaContext, catalog: Catalog,
+                 feedback: str | None = None) -> str:
+        self.calls.append(feedback)
+        idx = min(len(self.calls) - 1, len(self.scripts) - 1)
+        return self.scripts[idx]
 
 
 # ---------- 校验与执行 ----------
@@ -261,30 +300,47 @@ def execute(sql: str, db_path: Path | None = None, max_rows: int = 200) -> tuple
         conn.close()
 
 
-def ask(question: str, *, catalog: Catalog | None = None, retriever: SchemaRetriever | None = None,
-        use_llm: bool = True) -> SQLPlan:
+def ask(
+    question: str,
+    *,
+    catalog: Catalog | None = None,
+    retriever: SchemaRetriever | None = None,
+    generator: object | None = None,
+    use_llm: bool = True,
+    max_repair: int = 2,
+) -> SQLPlan:
+    """AC-1.1：失败带报错重试；AC-1.4：每次尝试都要过校验；AC-1.5：max_repair=0 只跑一次。"""
     started = time.time()
     catalog = catalog or load_catalog()
     retriever = retriever or SchemaRetriever(catalog)
+    gen = generator if generator is not None else (LLMGenerator() if use_llm else RuleGenerator())
+
     ctx, keywords = build_context(question, catalog, retriever)
     plan = SQLPlan(question=question, context=ctx, keywords=keywords)
+    plan.attempts = []
 
-    sql = rule_based_sql(question, catalog, ctx, keywords)
-    if use_llm:
-        sql = llm_sql(question, ctx, catalog) or sql
-    plan.sql = sql
+    feedback: str | None = None
+    for attempt in range(max(0, max_repair) + 1):
+        sql = gen(question, ctx, catalog, feedback)  # AC-1.1：第二轮能拿到 feedback
+        attempt_log: dict = {"n": attempt + 1, "sql": sql, "ok": False, "error": ""}
+        plan.sql = sql
 
-    ok, message = validate(sql, catalog)
-    plan.ok = ok
-    plan.error = message
-    if not ok:
-        plan.elapsed_ms = int((time.time() - started) * 1000)
-        return plan
-    try:
-        cols, rows = execute(sql)
-        plan.columns, plan.rows = cols, rows
-    except Exception as exc:  # 执行失败不抛给上层，进 error 字段
+        ok, message = validate(sql, catalog)  # AC-1.4：修复后的 SQL 也要校验
+        if ok:
+            try:
+                cols, rows = execute(sql)
+                plan.columns, plan.rows = cols, rows
+                plan.ok = True
+                attempt_log["ok"] = True
+                plan.attempts.append(attempt_log)
+                break
+            except Exception as exc:
+                message = f"执行失败：{exc}"
         plan.ok = False
-        plan.error = f"执行失败：{exc}"
+        plan.error = message
+        attempt_log["error"] = message
+        plan.attempts.append(attempt_log)
+        feedback = message
+
     plan.elapsed_ms = int((time.time() - started) * 1000)
     return plan
