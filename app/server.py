@@ -88,6 +88,10 @@ class Handler(BaseHTTPRequestHandler):
             "columns": plan.columns,
             "rows": [list(r) for r in plan.rows],
             "elapsed_ms": plan.elapsed_ms,
+            "intent": plan.intent,
+            "reply": plan.reply,
+            "clarify_options": plan.clarify_options,
+            "attempts": plan.attempts,
             "keywords": keywords,
             "context": {
                 "metrics": [{"key": h.key, "score": round(h.score, 4)} for h in (ctx.metrics if ctx else [])],

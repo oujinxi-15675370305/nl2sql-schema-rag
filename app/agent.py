@@ -15,6 +15,7 @@ from pathlib import Path
 from app.catalog import load_catalog
 from app.domain import Catalog, SchemaContext, SQLPlan
 from app.retrieval import SchemaRetriever
+from app.router import classify, reply_for
 
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = ROOT / "data" / "demo.sqlite"
@@ -318,6 +319,14 @@ def ask(
     ctx, keywords = build_context(question, catalog, retriever)
     plan = SQLPlan(question=question, context=ctx, keywords=keywords)
     plan.attempts = []
+
+    route = classify(question, catalog)  # AC-2.1 / AC-2.5：规则优先，不依赖模型
+    plan.intent = route.intent
+    if route.intent != "ask":  # AC-2.2：只有 ask 生成 SQL
+        plan.reply = reply_for(route)
+        plan.clarify_options = route.clarify_options
+        plan.elapsed_ms = int((time.time() - started) * 1000)
+        return plan
 
     feedback: str | None = None
     for attempt in range(max(0, max_repair) + 1):

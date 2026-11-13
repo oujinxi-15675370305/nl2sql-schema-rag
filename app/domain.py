@@ -123,3 +123,5 @@ class SQLPlan:
     keywords: dict[str, list[str]] = field(default_factory=dict)
     attempts: list[dict] = field(default_factory=list)
     intent: str = "ask"
+    reply: str = ""
+    clarify_options: list[str] = field(default_factory=list)
