@@ -122,6 +122,10 @@ class SQLPlan:
     context: SchemaContext | None = None
     keywords: dict[str, list[str]] = field(default_factory=dict)
     attempts: list[dict] = field(default_factory=list)
+    engine: str = ""  # rule / llm / custom，用来确认这次真的走了模型
     intent: str = "ask"
     reply: str = ""
     clarify_options: list[str] = field(default_factory=list)
+    session_id: str = ""  # M3：会话标识（没有会话时为空）
+    rewritten_question: str = ""  # M3：补上继承槽位后的自包含问句
+    inherited_slots: list[str] = field(default_factory=list)  # M3：本轮从上文继承的槽位名

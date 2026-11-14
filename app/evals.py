@@ -49,7 +49,12 @@ def run(verbose: bool = True) -> dict:
                 msg_expected = f"期望 SQL 执行失败：{exc}"
 
         plan_rows = plan.rows if plan.ok else []
-        same = normalize(plan_rows) == normalize(expected_rows) and bool(expected_rows or plan.ok)
+        # 被路由判成非 ask 也算失败：这类问题只表现为分数下降，不单独断言会很难定位
+        same = (
+            plan.intent == "ask"
+            and normalize(plan_rows) == normalize(expected_rows)
+            and bool(expected_rows or plan.ok)
+        )
         exact = " ".join(plan.sql.lower().split()) == " ".join(case["expected_sql"].lower().split())
         exec_hit += int(same)
         exact_hit += int(exact)
@@ -57,6 +62,7 @@ def run(verbose: bool = True) -> dict:
         details.append({
             "id": case["id"],
             "question": case["question"],
+            "intent": plan.intent,
             "sql": plan.sql,
             "expected_sql": case["expected_sql"],
             "ok": plan.ok,

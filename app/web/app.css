@@ -132,6 +132,19 @@ button:hover, .ghost:hover { border-color: var(--accent); color: #cfe3ff; }
 .state.loading { color: var(--accent); }
 .state.error { color: var(--err); }
 .state.ok { color: var(--ok); }
+.state.info { color: var(--muted); }
+
+.answer { font-size: 14px; line-height: 1.65; }
+.answer .reply { margin: 8px 0 6px; }
+.answer .options { margin: 4px 0 0 18px; padding: 0; color: var(--muted); font-size: 13px; }
+.answer .options li { margin: 3px 0; }
+.answer .choices { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+
+.attempts { margin: 8px 0 0; font-size: 12px; }
+.attempts-title { color: var(--muted); margin-bottom: 4px; }
+.attempt { padding: 2px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.attempt.ok { color: var(--ok); }
+.attempt.err { color: var(--err); }
 
 .table-wrap { overflow: auto; max-height: 420px; margin-top: 10px; }
 

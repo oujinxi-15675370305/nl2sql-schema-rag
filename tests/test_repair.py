@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
-from app.agent import ScriptedGenerator, ask
+from app.agent import RuleGenerator, ScriptedGenerator, ask
 from app.catalog import load_catalog
 
 GOOD_SQL = "SELECT COUNT(DISTINCT order_id) FROM orders WHERE status = 'paid' LIMIT 10"
@@ -34,6 +35,14 @@ class RepairTest(unittest.TestCase):
         self.assertEqual(one_shot.rows, repaired.rows)
         self.assertEqual(one_shot.columns, repaired.columns)
 
+    def test_ac_1_2_repaired_plan_has_no_stale_error(self) -> None:
+        # 回归：修好之后 ok=True 的返回值里不能还带着上一轮的报错
+        plan = ask("多少单", catalog=self.catalog, generator=ScriptedGenerator([TYPO_SQL, GOOD_SQL]),
+                   max_repair=1)
+        self.assertTrue(plan.ok)
+        self.assertEqual(plan.error, "")
+        self.assertEqual(plan.attempts[-1]["error"], "")
+
     def test_ac_1_3_exhausted_keeps_last_error_and_attempts(self) -> None:
         # AC-1.3：重试用完仍失败 → ok=False，error 是最后一次的报错，attempts 全量记录
         gen = ScriptedGenerator([TYPO_SQL, TYPO_SQL, TYPO_SQL])
@@ -57,6 +66,22 @@ class RepairTest(unittest.TestCase):
         plan = ask("多少单", catalog=self.catalog, generator=gen, max_repair=0)
         self.assertEqual(len(gen.calls), 1)
         self.assertFalse(plan.ok)
+
+    def test_query_timeout_is_not_retried(self) -> None:
+        # AC-1.6：超时不重试同一句（否则一次请求烧掉 3 倍预算），attempts 只记一次
+        runaway = "SELECT COUNT(*) FROM orders a, orders b, orders c, orders d"
+        with mock.patch("app.agent.QUERY_TIMEOUT_S", 0.2):
+            plan = ask("多少单", catalog=self.catalog,
+                       generator=ScriptedGenerator([runaway]), max_repair=2)
+        self.assertFalse(plan.ok)
+        self.assertIn("超时", plan.error)
+        self.assertEqual(len(plan.attempts), 1)
+
+    def test_engine_reports_which_generator_ran(self) -> None:
+        # 排查"配了 key 却一直走规则"：返回值要说清这次是谁生成的
+        self.assertEqual(ask("多少单", catalog=self.catalog, generator=RuleGenerator()).engine, "rule")
+        scripted = ask("多少单", catalog=self.catalog, generator=ScriptedGenerator([GOOD_SQL]))
+        self.assertEqual(scripted.engine, "custom")
 
     def test_ac_1_4_reverse_unknown_table_is_reported(self) -> None:
         # 反向用例：编造表名必须报错且不执行

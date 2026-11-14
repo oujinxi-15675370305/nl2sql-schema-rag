@@ -16,75 +16,28 @@ from app.catalog import load_catalog
 from app.domain import Catalog, SchemaContext, SQLPlan
 from app.retrieval import SchemaRetriever
 from app.router import classify, reply_for
+from app.session import Session, inherit_slots, rewrite_question
+from app.slots import extract_keywords
 
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = ROOT / "data" / "demo.sqlite"
-
-# ---------- 关键词 ----------
-REGIONS = ("华东", "华南", "华北", "西南")
-CATEGORIES = ("家电", "数码", "服饰", "食品")
-METRIC_HINTS = {
-    "gmv": ("成交", "销售额", "营收", "gmv", "交易额", "卖了多少"),
-    "order_count": ("多少单", "订单数", "单量", "订单量"),
-    "aov": ("客单价", "平均订单", "均价"),
-    "refund_rate": ("退款率", "退货率"),
-    "units": ("销量", "件数", "卖了多少件"),
-}
-DIMENSION_HINTS = {
-    "region": ("地区", "区域", "大区", "各省"),
-    "category": ("品类", "类目", "分类"),
-    "brand": ("品牌",),
-    "month": ("每月", "按月", "月份", "月度"),
-    "product": ("商品", "产品", "单品"),
-}
-
-
-def extract_keywords(question: str, catalog: Catalog) -> dict[str, list[str]]:
-    q = question.lower()
-    out: dict[str, list[str]] = {"metric": [], "dimension": [], "filter": [], "time": []}
-    for metric, hints in METRIC_HINTS.items():
-        if any(h.lower() in q for h in hints):
-            out["metric"].append(metric)
-    for metric in catalog.metrics:
-        if any(s.lower() in q for s in metric.synonyms):
-            if metric.name not in out["metric"]:
-                out["metric"].append(metric.name)
-    group_intent = bool(re.search(r"(各|每|按|分|排名|top|分别|各地|各类|哪些)", question))
-    if group_intent:
-        for dim, hints in DIMENSION_HINTS.items():
-            if any(h in question for h in hints):
-                out["dimension"].append(dim)
-    for region in REGIONS:
-        if region in question:
-            out["filter"].append(f"region:{region}")
-    for cat in CATEGORIES:
-        if cat in question:
-            out["filter"].append(f"category:{cat}")
-    if "上个月" in question or "上月" in question:
-        out["time"].append("last_month")
-    if "本月" in question or "这个月" in question:
-        out["time"].append("this_month")
-    if "今年" in question:
-        out["time"].append("this_year")
-    if "去年" in question:
-        out["time"].append("last_year")
-    if "最近30天" in question or "近30天" in question:
-        out["time"].append("last_30d")
-    m = re.search(r"(20\d{2})-(\d{1,2})", question)
-    if m:
-        out["time"].append(f"month:{m.group(1)}-{int(m.group(2)):02d}")
-    return out
-
+QUERY_TIMEOUT_S = 5.0  # 单条 SQL 的执行预算，超了就让 sqlite 中断
 
 # ---------- 上下文 ----------
-def build_context(question: str, catalog: Catalog, retriever: SchemaRetriever) -> tuple[SchemaContext, dict]:
-    keywords = extract_keywords(question, catalog)
+def build_context(
+    question: str,
+    catalog: Catalog,
+    retriever: SchemaRetriever,
+    keywords: dict | None = None,
+) -> tuple[SchemaContext, dict]:
+    """`keywords` 传了就用它（M3 里是继承后的槽位），避免再抽一遍。"""
+    slots = keywords if keywords is not None else extract_keywords(question, catalog)
     metrics, tables, columns = retriever.retrieve(question)
     ctx = SchemaContext(metrics=metrics, tables=tables, columns=columns)
     # 关键词命中的指标置顶
-    if keywords["metric"]:
-        ctx.metrics.sort(key=lambda h: (h.key not in keywords["metric"], -h.score))
-    return ctx, keywords
+    if slots["metric"]:
+        ctx.metrics.sort(key=lambda h: (h.key not in slots["metric"], -h.score))
+    return ctx, slots
 
 
 # ---------- SQL 生成（离线规则 + 可选 LLM） ----------
@@ -137,7 +90,7 @@ def _group_expr(dim: str) -> tuple[str, str]:
 
 def rule_based_sql(question: str, catalog: Catalog, ctx: SchemaContext, keywords: dict) -> str:
     # FIXME: 只支持单指标 + 单维度。像「各品牌客单价」这种能跑，但「各品牌客单价和销量对比」会退化。
-    # TODO: 多轮追问没做，每轮都当独立问题处理。
+    # M3：多轮继承在 ask() 里做完再传进来，这里只按槽位拼 SQL，不关心槽位是抽的还是继承的。
     metric = keywords["metric"][0] if keywords["metric"] else None
     if metric is None:
         metric = ctx.metrics[0].key if ctx.metrics else "gmv"
@@ -229,7 +182,12 @@ def llm_sql(
 
 # ---------- 生成器（可替换，便于测试与接入不同模型） ----------
 class RuleGenerator:
-    """离线规则生成器。不看 feedback：规则改不了自己，靠兜底不是靠重试。"""
+    """离线规则生成器。不看 feedback：规则改不了自己，靠兜底不是靠重试。
+
+    拿到的是 ask() 改写过的自包含问句（继承槽位已补进文本），所以这里照常抽一次即可。
+    """
+
+    last_engine = "rule"
 
     def __call__(self, question: str, ctx: SchemaContext, catalog: Catalog,
                  feedback: str | None = None) -> str:
@@ -241,10 +199,13 @@ class LLMGenerator:
 
     def __init__(self, fallback: RuleGenerator | None = None) -> None:
         self.fallback = fallback or RuleGenerator()
+        self.last_engine = "rule"
 
     def __call__(self, question: str, ctx: SchemaContext, catalog: Catalog,
                  feedback: str | None = None) -> str:
         sql = llm_sql(question, ctx, catalog, feedback)
+        # 让上层能看出这次到底走了模型还是退回了规则（排查 key/超时全靠它）
+        self.last_engine = "llm" if sql else "rule"
         return sql if sql else self.fallback(question, ctx, catalog, feedback)
 
 
@@ -286,17 +247,41 @@ def validate(sql: str, catalog: Catalog, max_rows: int = 200) -> tuple[bool, str
     return True, ""
 
 
-def execute(sql: str, db_path: Path | None = None, max_rows: int = 200) -> tuple[list[str], list[tuple]]:
+class QueryTimeout(TimeoutError):
+    """SQL 跑过了执行预算，被 sqlite 的 progress handler 中断。"""
+
+
+def execute(
+    sql: str,
+    db_path: Path | None = None,
+    max_rows: int = 200,
+    timeout_s: float | None = None,
+) -> tuple[list[str], list[tuple]]:
+    """只读执行，带语句级超时。
+
+    sqlite 的 `timeout=` 只是等锁，管不住慢查询；这里挂 progress handler，
+    每 1 万条 VM 指令看一眼表，超预算就返回非 0 让 sqlite 中断。
+    """
     path = Path(db_path or DB_PATH)
     if not path.exists():
         raise FileNotFoundError(f"演示库不存在：{path}，先运行 python scripts/seed_demo_db.py")
+    limit = QUERY_TIMEOUT_S if timeout_s is None else timeout_s
+    deadline = time.monotonic() + limit if limit and limit > 0 else None
+
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
     try:
         conn.execute("PRAGMA query_only = ON")
-        cur = conn.execute(sql)
-        rows = cur.fetchmany(max_rows)
-        cols = [d[0] for d in cur.description] if cur.description else []
-        return cols, rows
+        if deadline is not None:
+            conn.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, 10000)
+        try:
+            cur = conn.execute(sql)
+            rows = cur.fetchmany(max_rows)
+            cols = [d[0] for d in cur.description] if cur.description else []
+            return cols, rows
+        except sqlite3.OperationalError as exc:
+            if deadline is not None and "interrupt" in str(exc).lower():
+                raise QueryTimeout(f"查询超时（>{limit:g} 秒），已中断") from exc
+            raise
     finally:
         conn.close()
 
@@ -309,18 +294,34 @@ def ask(
     generator: object | None = None,
     use_llm: bool = True,
     max_repair: int = 2,
+    session: Session | None = None,
 ) -> SQLPlan:
-    """AC-1.1：失败带报错重试；AC-1.4：每次尝试都要过校验；AC-1.5：max_repair=0 只跑一次。"""
+    """AC-1.1：失败带报错重试；AC-1.4：每次尝试都要过校验；AC-1.5：max_repair=0 只跑一次。
+
+    M3 的顺序（AC-3.6）：**session → 槽位继承 → classify → 生成**，不能先路由：
+    "那上个月呢"字面上没有指标，先路由会被判成 clarify。
+    """
     started = time.time()
     catalog = catalog or load_catalog()
     retriever = retriever or SchemaRetriever(catalog)
     gen = generator if generator is not None else (LLMGenerator() if use_llm else RuleGenerator())
 
-    ctx, keywords = build_context(question, catalog, retriever)
-    plan = SQLPlan(question=question, context=ctx, keywords=keywords)
+    # AC-3.1 / AC-3.2：取上文槽位，补齐这句缺的
+    previous = session.last_slots() if session is not None else None
+    slots, inherited = inherit_slots(question, extract_keywords(question, catalog), previous)
+    rewritten = rewrite_question(question, slots, inherited)
+    ctx, keywords = build_context(rewritten, catalog, retriever, keywords=slots)
+    plan = SQLPlan(
+        question=question,
+        context=ctx,
+        keywords=keywords,
+        session_id=session.id if session is not None else "",
+        rewritten_question=rewritten,
+        inherited_slots=inherited,
+    )
     plan.attempts = []
 
-    route = classify(question, catalog)  # AC-2.1 / AC-2.5：规则优先，不依赖模型
+    route = classify(question, catalog, slots)  # AC-2.1 / AC-2.5 / AC-3.6：槽位由上面传进来
     plan.intent = route.intent
     if route.intent != "ask":  # AC-2.2：只有 ask 生成 SQL
         plan.reply = reply_for(route)
@@ -328,28 +329,40 @@ def ask(
         plan.elapsed_ms = int((time.time() - started) * 1000)
         return plan
 
+    if session is not None:
+        session.add(question, slots)  # AC-3.1：只把真正问数的一轮记成上下文
+
     feedback: str | None = None
     for attempt in range(max(0, max_repair) + 1):
-        sql = gen(question, ctx, catalog, feedback)  # AC-1.1：第二轮能拿到 feedback
+        # 交给生成器的是改写后的自包含问句（M3）：模型和规则都不该自己猜上文
+        sql = gen(rewritten, ctx, catalog, feedback)  # AC-1.1：第二轮能拿到 feedback
         attempt_log: dict = {"n": attempt + 1, "sql": sql, "ok": False, "error": ""}
         plan.sql = sql
 
         ok, message = validate(sql, catalog)  # AC-1.4：修复后的 SQL 也要校验
+        timed_out = False
         if ok:
             try:
                 cols, rows = execute(sql)
                 plan.columns, plan.rows = cols, rows
                 plan.ok = True
+                plan.error = ""  # 修好之后不能把上一轮的报错留在返回值里
                 attempt_log["ok"] = True
                 plan.attempts.append(attempt_log)
                 break
+            except QueryTimeout as exc:
+                message = f"执行失败：{exc}"
+                timed_out = True
             except Exception as exc:
                 message = f"执行失败：{exc}"
         plan.ok = False
         plan.error = message
         attempt_log["error"] = message
         plan.attempts.append(attempt_log)
+        if timed_out:
+            break  # 同一句重跑只会再烧满一次预算，等模型改完再说
         feedback = message
 
+    plan.engine = getattr(gen, "last_engine", "custom")
     plan.elapsed_ms = int((time.time() - started) * 1000)
     return plan

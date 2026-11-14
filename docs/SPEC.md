@@ -4,7 +4,7 @@
 
 ## 0. 一句话
 
-给数据仓库做 NL2SQL：先把问题缩到「指标 / 表 / 列」，再生成 SQL，校验、执行；错了能带着报错自己改一次；答案要能追到口径。
+给数据仓库做 NL2SQL：先把问题缩到「指标 / 表 / 列」，再生成 SQL，校验、执行；错了能带着报错自己改（默认最多 2 次）；不是问数的问题不硬编 SQL，答案要能追到口径。
 
 ## 1. 目标（做完这几件就算完成）
 
@@ -38,14 +38,15 @@
 - **AC-1.3**：用完重试次数仍失败，`ok=False` 且 `error` 含最后一次错误，`attempts` 记录全部尝试。
 - **AC-1.4**：修复路径不得绕过校验器（修复后的 SQL 仍要过 `validate`）。
 - **AC-1.5**：关闭重试（`max_repair=0`）时，行为与旧版一致（只尝试一次）。
+- **AC-1.6**：单条 SQL 有执行预算（默认 5 秒），超时中断并记为失败；超时不重试同一句（重跑只会再烧满一次预算）。
 
 ### M2 意图路由（P0）
 
 - **AC-2.1**：五类意图——`ask`（问数）/ `chat`（闲聊）/ `clarify`（缺信息）/ `out_of_scope`（超纲）/ `unsafe`（越权或写操作）。
-- **AC-2.2**：只有 `ask` 会生成 SQL；其余三类返回固定话术，`sql` 为空。
-- **AC-2.3**：缺信息（如"看下业绩"没说指标/时间）返回 `clarify`，并给出候选澄清项。
-- **AC-2.4**：含写操作词（删除/更新/插入/导出到文件）判为 `unsafe`，不生成 SQL。
-- **AC-2.5**：路由是规则优先（可解释），LLM 只在规则不确定时兜底；关闭 LLM 时路由仍可用。
+- **AC-2.2**：只有 `ask` 会生成 SQL；其余四类返回固定话术，`sql` 为空。
+- **AC-2.3**：缺信息（如"看下业绩"没说指标/时间）返回 `clarify`，并给出候选澄清项。判定用 `extract_keywords` 的 metric 槽位，不另抄一份指标词表。
+- **AC-2.4**：含写操作词（删除/更新/插入/导出到文件）判为 `unsafe`，不生成 SQL。只拦祈使用法："被删除的订单有多少"这类定语不算写操作。
+- **AC-2.5**：路由是规则优先（可解释）；关闭 LLM 时路由仍可用。低置信度交给 LLM 兜底**不在 M2 范围**（`Route.confidence` 留了接口，没用）。
 
 ### M3 多轮追问（P1）
 
@@ -74,17 +75,22 @@
 ```python
 # app/agent.py
 ask(question: str, *, catalog=None, retriever=None, generator=None,
-    max_repair: int = 2, session=None, role: str = "analyst") -> SQLPlan
+    use_llm: bool = True, max_repair: int = 2) -> SQLPlan
+# M3/M4 才会加：session=None, role: str = "analyst"
 
 # app/domain.py
 SQLPlan: question, sql, ok, error, rows, columns, elapsed_ms,
-         context, keywords, attempts, intent, session_id, masked_columns
+         context, keywords, attempts, engine, intent, reply, clarify_options
+# M3/M4 才会加：session_id, masked_columns
 ```
 
 ```http
 POST /api/ask
-  { "question": "...", "session_id": "可选", "role": "analyst|viewer" }
-  → { sql, ok, error, columns, rows, elapsed_ms, intent, attempts, context, keywords }
+  { "question": "...", "use_llm": true }
+  → { sql, ok, error, columns, rows, elapsed_ms, intent, reply,
+      clarify_options, engine, attempts, context, keywords }
+  # engine: rule | llm | custom，用来确认这次真的走了模型
+  # session_id / role 是 M3/M4 的预留字段，现在传了也会被忽略
 GET /api/schema → 表/列/指标
 GET /api/eval   → 评测摘要
 GET /api/health → { ok, tables, metrics }
@@ -93,7 +99,7 @@ GET /api/health → { ok, tables, metrics }
 ## 5. 质量门槛（不过不许提交）
 
 1. `python -m unittest discover -s tests` 全绿；
-2. `python -m app.evals` 执行一致率 ≥ 85%；
+2. `python -m app.evals` 执行一致率 ≥ 85%（CI 目前按 90% 卡）；
 3. 新增模块必须有 ≥ 3 条带 AC 编号的测试；
 4. 不许引入第三方运行时依赖（保持 `dependencies = []`）；
 5. 每条 AC 至少要有一条"反向用例"（错误输入被正确拒绝）。
@@ -109,9 +115,10 @@ GET /api/health → { ok, tables, metrics }
 | 模块 | 状态 | 备注 |
 |---|---|---|
 | 基线（M0：检索/生成/校验/执行/评测/页面） | ✅ 已完成 | 20 条评测 100% |
-| M1 SQL 自我修复 | ✅ 已完成 | 6 条 AC 测试；`scripts/demo_repair.py` 可复现 |
-| M2 意图路由 | ⬜ 待做 | |
-| M3 多轮追问 | ⬜ 待做 | |
+| M1 SQL 自我修复 | ✅ 已完成 | 9 条测试（含 error 清理 / engine / 超时回归）；`scripts/demo_repair.py` 可复现 |
+| M2 意图路由 | ✅ 已完成 | 13 条测试；槽位判澄清；非 ask 不生成 SQL，返回话术；前端已接 |
+| M1/M2 审核修复 | ✅ 已完成 | 2026-11-13 |
+| M3 多轮追问 | ⬜ 待做 | 开工前先读 review 文档 §6：槽位继承要在路由之前 |
 | M4 权限与脱敏 | ⬜ 待做 | |
 | M5 评测扩容 + CI | ⬜ 待做 | 20 → 50 条 |
 

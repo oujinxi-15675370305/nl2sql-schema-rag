@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.agent import METRIC_SQL, build_context, execute, rule_based_sql, validate
+from app.agent import METRIC_SQL, QueryTimeout, build_context, execute, rule_based_sql, validate
 from app.catalog import load_catalog
 from app.evals import normalize, run as run_eval
 from app.retrieval import SchemaRetriever, rrf, tokenize
@@ -107,6 +107,17 @@ class ExecutionTest(unittest.TestCase):
     def test_readonly_connection(self) -> None:
         with self.assertRaises(Exception):
             execute("INSERT INTO regions(region_id, region_name) VALUES (99, 'x')")
+
+    def test_query_timeout_interrupts_runaway_sql(self) -> None:
+        # AC-1.6 反向用例：笛卡尔积跑不完，必须在预算内被中断，不能把线程挂住
+        with self.assertRaises(QueryTimeout):
+            execute("SELECT COUNT(*) FROM orders a, orders b, orders c, orders d", timeout_s=0.2)
+
+    def test_zero_timeout_disables_the_guard(self) -> None:
+        # AC-1.6：timeout_s=0 表示不限时，正常查询照常返回
+        cols, rows = execute("SELECT COUNT(*) FROM orders", timeout_s=0)
+        self.assertEqual(len(cols), 1)
+        self.assertGreater(rows[0][0], 0)
 
 
 class EvalTest(unittest.TestCase):

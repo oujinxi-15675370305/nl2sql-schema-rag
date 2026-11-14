@@ -1,25 +1,65 @@
 """M2：意图路由。规则优先（可解释），LLM 只在规则判不出来时兜底。
 
 五类：ask / chat / clarify / out_of_scope / unsafe。对照 docs/SPEC.md 的 AC-2.1 ~ AC-2.5。
+
+判定顺序（越直接越靠前，避免"写操作"被当成问数）：
+1. 空输入 / 纯标点 → chat
+2. 写操作 / 导出 → unsafe（只拦祈使用法，"被删除的订单"这种定语放行）
+3. 整句都是客套话 → chat（剥掉寒暄后不剩内容才算，"好的，各地区的GMV" 仍是 ask）
+4. 问表结构 / 字段 → out_of_scope
+5. 与数据无关 → out_of_scope
+6. 有数据词但**抽不到指标** → clarify（AC-2.3）
+7. 其余 → ask
+
+槽位由调用方传进来（M3 在会话继承算完槽位之后才调这里），**classify 不自己抽取**：
+`ask()` 的调用顺序是 session → 槽位继承 → classify → 生成；如果这里再抽一遍原始问题，
+"那上个月呢" 会抽出空指标，被判成 clarify，多轮就断在第二轮。
+文本类判定（闲聊 / 写操作 / 超纲）仍然看原始问题，不看继承来的槽位。
 """
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
 
-from app.catalog import load_catalog
 from app.domain import Catalog
 
-WRITE_WORDS = r"(删除|删掉|删了|删|清空|更新|修改|改数|插入|导入|建表|改表|导出|下载|备份|drop|delete|update|insert|truncate|alter)"
-CHAT_WORDS = r"(你好|您好|hi|hello|在吗|谢谢|感谢|再见|你是谁|你能做什么|哈哈|嗯|好的)"
-VAGUE_WORDS = r"(业绩|数据|报表|情况|表现|怎么样|如何|看一下|查一下|分析一下)"
-OFFTOPIC_WORDS = r"(天气|股票|彩票|新闻|写代码|写个|翻译|笑话|故事|诗|菜谱|星座|电影)"
+# 无条件拦：这些词没有"读查询"的用法
+STRONG_WRITE = re.compile(
+    r"(导出|下载|备份|清空|建表|改表|truncate|drop|attach|vacuum)"
+    r"|(?<![A-Za-z])(?:delete|update|insert|alter|create)(?![A-Za-z])",
+    re.I,
+)
+# 有歧义：只有祈使用法才算写操作。"被删除的订单""更新时间分布"是在读数据，放行。
+SOFT_WRITE = re.compile(
+    r"(?<!被)(?:删除|删掉|删了|删|更新|修改|改数|改成|改为|插入|导入)"
+    r"(?!的|后|前|过|时间|日期|状态|记录|标记)"
+)
 
-# 能说明"这是在问数据"的词（表名、指标同义词、列同义词、时间与维度词）
+CHAT_WORDS = re.compile(
+    r"你好|您好|在吗|谢谢|感谢|再见|你是谁|你能做什么|哈哈|嗯|好的"
+    r"|(?<![A-Za-z])(?:hi|hello|ok|okay)(?![A-Za-z])",
+    re.I,
+)
+CHAT_NOISE = re.compile(r"[\s,，。！？!?~、…\.：:；;\"'“”‘’]+")
+
+META_PATTERN = re.compile(r"(表结构|字段|数据字典|schema|有哪些表|哪些维度|哪些指标|怎么用)", re.I)
+OFFTOPIC_WORDS = re.compile(r"(天气|股票|彩票|新闻|写代码|写个|翻译|笑话|故事|诗|菜谱|星座|电影)")
+
+# 只要出现这些词，就认为"问题像是问数据的"（不含"各/每"这种到处都是的字）
 DATA_HINTS = re.compile(
     r"(GMV|gmv|成交|销售|营收|订单|客户|商品|品类|品牌|地区|区域|退款|客单价|销量|件数|金额|业绩|经营|流水|收入|毛利|"
-    r"上个月|上月|本月|今年|去年|最近|每月|按月|各|每)"
+    r"上个月|上月|本月|这个月|今年|去年|最近|每月|按月)"
 )
+
+# 澄清时能给的维度，从 catalog 里带 is_dimension 的列翻译过来
+DIMENSION_LABELS = {
+    "region_name": "地区",
+    "category": "品类",
+    "brand": "品牌",
+    "order_date": "月份",
+    "product_name": "商品",
+}
+TIME_OPTIONS = "时间范围？本月 / 上个月 / 今年 / 去年 / 具体月份"
 
 
 @dataclass
@@ -28,9 +68,13 @@ class Route:
     reason: str
     confidence: float = 1.0
     clarify_options: list[str] = field(default_factory=list)
+    reply: str = ""  # 特殊场景（如问表结构）自定义话术，为空则用 reply_for 的默认话术
 
 
-def _has_data_hint(question: str, catalog: Catalog) -> bool:
+def _has_data_hint(question: str, catalog: Catalog, keywords: dict[str, list[str]] | None = None) -> bool:
+    """字面数据词 + 槽位。传 keywords 时把继承来的槽位也算进来（"换成华南"字面上没有数据词）。"""
+    if keywords and any(keywords.get(k) for k in ("metric", "dimension", "filter", "time")):
+        return True
     if DATA_HINTS.search(question):
         return True
     low = question.lower()
@@ -43,43 +87,70 @@ def _has_data_hint(question: str, catalog: Catalog) -> bool:
     return False
 
 
-def classify(question: str, catalog: Catalog | None = None) -> Route:
-    catalog = catalog or load_catalog()
+def _metric_options(catalog: Catalog) -> str:
+    labels = [m.synonyms[0] if m.synonyms else m.name for m in catalog.metrics]
+    return "看哪个指标？" + " / ".join(labels)
+
+
+def _dimension_options(catalog: Catalog) -> str:
+    labels = [DIMENSION_LABELS[c.name] for t in catalog.tables for c in t.columns
+              if c.is_dimension and c.name in DIMENSION_LABELS]
+    return "按什么维度看？" + " / ".join(dict.fromkeys(labels))
+
+
+def _clarify_options(question: str, catalog: Catalog, keywords: dict[str, list[str]]) -> list[str]:
+    options: list[str] = []
+    if not keywords["dimension"] and not keywords["filter"]:
+        options.append(_dimension_options(catalog))
+    options.append(_metric_options(catalog))
+    if not keywords["time"]:
+        options.append(TIME_OPTIONS)
+    return options
+
+
+def classify(question: str, catalog: Catalog, keywords: dict[str, list[str]]) -> Route:
+    """`keywords` 必须是调用方算好的槽位（M3 里是继承之后的），这里不再重新抽取。"""
     q = question.strip()
 
+    if not q:
+        return Route("chat", "空输入")
+    if not CHAT_NOISE.sub("", q):
+        return Route("chat", "只有标点或空白")
+
     # 1) 写操作：最优先拦，避免生成任何 SQL
-    if re.search(WRITE_WORDS, q, re.I):
-        return Route("unsafe", "包含写操作或导出请求", clarify_options=[])
+    if STRONG_WRITE.search(q) or SOFT_WRITE.search(q):
+        return Route("unsafe", "包含写操作或导出请求")
 
-    # 2) 纯闲聊
-    if len(q) <= 12 and re.search(CHAT_WORDS, q, re.I):
+    # 2) 整句都是客套话（剥掉寒暄后没剩下内容）
+    if not CHAT_NOISE.sub("", CHAT_WORDS.sub("", q)).strip():
         return Route("chat", "闲聊或客套话")
-    if re.fullmatch(r"[\s,，。！？!?~]+", q):
-        return Route("chat", "空输入或只有标点")
 
-    vague = bool(re.search(VAGUE_WORDS, q))
-    has_hint = _has_data_hint(q, catalog)
+    # 3) 问 schema 本身不是问数
+    if META_PATTERN.search(q) and not keywords["metric"]:
+        return Route(
+            "out_of_scope",
+            "问的是表结构/字段，不是数据",
+            reply="这是问数入口；表结构可以看右上角「看 schema」或 /api/schema。",
+        )
 
-    # 3) 有数据意图但说不清：要澄清
-    if has_hint and vague and not re.search(r"(GMV|gmv|成交|销售|营收|订单数|客单价|退款率|销量)", q):
-        options = []
-        if not re.search(r"(地区|品类|品牌|商品|每月|按月)", q):
-            options.append("按什么维度看？地区 / 品类 / 品牌 / 月份")
-        options.append("看哪个指标？GMV / 订单数 / 客单价 / 退款率 / 销量")
-        options.append("时间范围？本月 / 上个月 / 今年 / 具体月份")
-        return Route("clarify", "缺指标或维度，需要澄清", clarify_options=options)
-
-    # 4) 与数据无关：超纲
-    if re.search(OFFTOPIC_WORDS, q) and not has_hint:
+    # 4) 与数据无关：超纲。这里只看字面——超纲词不能被继承来的槽位救回来
+    if OFFTOPIC_WORDS.search(q) and not _has_data_hint(q, catalog):
         return Route("out_of_scope", "与数据仓库无关的问题")
-    if not has_hint:
+    if not _has_data_hint(q, catalog, keywords):
         return Route("out_of_scope", "没有识别到指标、表或维度", confidence=0.6)
 
-    # 5) 其余按问数处理
-    return Route("ask", "识别到指标/维度/时间")
+    # 5) 有数据意图但抽不到指标：要澄清（AC-2.3）
+    if not keywords["metric"]:
+        return Route("clarify", "没有识别出指标，需要澄清",
+                     clarify_options=_clarify_options(q, catalog, keywords))
+
+    # 6) 其余按问数处理
+    return Route("ask", "识别到指标")
 
 
 def reply_for(route: Route) -> str:
+    if route.reply:
+        return route.reply
     if route.intent == "chat":
         return "我在。你可以直接问数据，比如「上个月的 GMV」「各地区的订单数」。"
     if route.intent == "clarify":

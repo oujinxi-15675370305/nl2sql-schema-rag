@@ -11,10 +11,12 @@ from app.agent import ask, build_context
 from app.catalog import load_catalog
 from app.domain import Catalog
 from app.retrieval import SchemaRetriever
+from app.session import SessionStore
 
 WEB = Path(__file__).with_name("web")
 CATALOG: Catalog = load_catalog()
 RETRIEVER = SchemaRetriever(CATALOG)
+SESSIONS = SessionStore()  # M3：进程内会话，重启即清空
 
 
 def _json(payload: dict, status: int = 200) -> tuple[int, str, bytes]:
@@ -78,7 +80,15 @@ class Handler(BaseHTTPRequestHandler):
         if not question:
             return self._send(*_json({"ok": False, "error": "question 不能为空"}, 400))
 
-        plan = ask(question, catalog=CATALOG, retriever=RETRIEVER, use_llm=payload.get("use_llm", True))
+        # M3：前端没带 session_id 就新开一个，带回来就接着上文
+        session = SESSIONS.get(str(payload.get("session_id") or "").strip() or None)
+        plan = ask(
+            question,
+            catalog=CATALOG,
+            retriever=RETRIEVER,
+            use_llm=payload.get("use_llm", True),
+            session=session,
+        )
         ctx, keywords = plan.context, plan.keywords
         body = {
             "question": question,
@@ -91,8 +101,12 @@ class Handler(BaseHTTPRequestHandler):
             "intent": plan.intent,
             "reply": plan.reply,
             "clarify_options": plan.clarify_options,
+            "engine": plan.engine,
             "attempts": plan.attempts,
             "keywords": keywords,
+            "session_id": plan.session_id,
+            "rewritten_question": plan.rewritten_question,
+            "inherited_slots": plan.inherited_slots,
             "context": {
                 "metrics": [{"key": h.key, "score": round(h.score, 4)} for h in (ctx.metrics if ctx else [])],
                 "tables": [{"key": h.key, "score": round(h.score, 4)} for h in (ctx.tables if ctx else [])],
