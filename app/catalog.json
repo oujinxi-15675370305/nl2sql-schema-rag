@@ -47,6 +47,17 @@
         {"name": "region_id", "type": "INTEGER", "comment": "地区编号", "is_dimension": true},
         {"name": "region_name", "type": "TEXT", "comment": "地区名称（华东/华南/华北/西南）", "synonyms": ["地区名", "大区名"], "is_dimension": true}
       ]
+    },
+    {
+      "name": "customers",
+      "comment": "客户主数据，一行一个客户",
+      "synonyms": ["客户", "顾客", "会员"],
+      "columns": [
+        {"name": "customer_id", "type": "TEXT", "comment": "客户编号", "is_dimension": true},
+        {"name": "region_id", "type": "INTEGER", "comment": "地区编号", "is_dimension": true},
+        {"name": "customer_name", "type": "TEXT", "comment": "客户名称", "synonyms": ["客户名", "客户名单"], "is_dimension": true},
+        {"name": "customer_phone", "type": "TEXT", "comment": "手机号（敏感列）", "synonyms": ["手机号", "电话", "手机", "联系方式"], "sensitive": true}
+      ]
     }
   ],
   "metrics": [
@@ -54,6 +65,7 @@
     {"name": "order_count", "comment": "订单数：已支付订单的数量", "synonyms": ["订单数", "单量", "订单量", "多少单"], "requires": ["orders.order_id"], "sql": "COUNT(DISTINCT o.order_id)"},
     {"name": "aov", "comment": "客单价：成交总额 / 订单数", "synonyms": ["客单价", "平均订单金额", "均价"], "requires": ["orders.pay_amount"], "sql": "ROUND(SUM(o.pay_amount) * 1.0 / COUNT(DISTINCT o.order_id), 2)"},
     {"name": "refund_rate", "comment": "退款率：退款订单数 / 已支付订单数", "synonyms": ["退款率", "退货率"], "requires": ["orders.refund_amount"], "sql": "ROUND(SUM(CASE WHEN o.status = 'refunded' THEN 1 ELSE 0 END) * 1.0 / COUNT(DISTINCT o.order_id), 4)"},
-    {"name": "units", "comment": "销量：商品件数之和", "synonyms": ["销量", "件数", "卖了多少件"], "requires": ["order_items.quantity"], "sql": "SUM(i.quantity)"}
+    {"name": "units", "comment": "销量：商品件数之和", "synonyms": ["销量", "件数", "卖了多少件"], "requires": ["order_items.quantity"], "sql": "SUM(i.quantity)"},
+    {"name": "customer_count", "comment": "客户数：有成交的客户数（按客户去重）", "synonyms": ["客户数", "客户数量", "多少客户", "多少个客户", "客户人数"], "requires": ["customers.customer_id"], "sql": "COUNT(DISTINCT c.customer_id)"}
   ]
 }

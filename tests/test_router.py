@@ -51,17 +51,37 @@ class RouterClassifyTest(unittest.TestCase):
 
     def test_ac_2_3_unresolved_metric_asks_clarify(self) -> None:
         # 反向用例：抽不到指标就澄清，不能默默挑一个指标去算
-        for q in ("有多少客户", "客户数量", "这个月表现怎么样"):
+        # （"有多少客户"以前是这里的主力样例；M4 前置加了 customer_count 指标后它已经是 ask）
+        for q in ("这个月表现怎么样", "看下业绩", "经营情况"):
             with self.subTest(q=q):
                 r = route(q, self.catalog)
                 self.assertEqual(r.intent, "clarify")
                 self.assertGreaterEqual(len(r.clarify_options), 2)
+
+    def test_customer_questions_route_to_ask(self) -> None:
+        # M4 前置：客户数成为正式指标，客户相关问题不再一律澄清
+        for q in ("有多少客户", "客户数量", "各地区的客户数", "每个客户的GMV"):
+            with self.subTest(q=q):
+                self.assertEqual(route(q, self.catalog).intent, "ask")
 
     def test_ac_2_4_attributive_write_words_are_not_unsafe(self) -> None:
         # 反向用例："被删除的订单""更新时间"是读查询，不能拦成 unsafe
         for q in ("更新时间分布", "被删除的订单有多少"):
             with self.subTest(q=q):
                 self.assertNotEqual(route(q, self.catalog).intent, "unsafe")
+
+    def test_ac_2_4_rewrite_phrase_is_not_unsafe(self) -> None:
+        # 回归："改成华南"是 M3 的改写问句；只有"把/将 … 改成"才是改数据
+        for q in ("改成华南", "帮我改成华南"):
+            with self.subTest(q=q):
+                self.assertNotEqual(route(q, self.catalog).intent, "unsafe")
+        for q in ("把金额改成100", "把订单状态改为已退款"):
+            with self.subTest(q=q):
+                self.assertEqual(route(q, self.catalog).intent, "unsafe")
+
+    def test_ac_2_4_deleted_attribute_is_not_unsafe(self) -> None:
+        # 回归：正则回溯到单字"删"时不能绕过"删除的"豁免（"已删除的订单"）
+        self.assertNotEqual(route("已删除的订单有多少", self.catalog).intent, "unsafe")
 
     def test_ac_2_1_chat_requires_whole_sentence(self) -> None:
         # 回归：带客套前缀的数据问题不能被判成闲聊

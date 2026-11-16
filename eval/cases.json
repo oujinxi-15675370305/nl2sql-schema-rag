@@ -19,6 +19,8 @@
     {"id": 17, "question": "每月销量", "expected_sql": "SELECT substr(o.order_date, 1, 7), ROUND(SUM(i.quantity), 2) FROM orders o JOIN order_items i ON i.order_id = o.order_id WHERE o.status = 'paid' GROUP BY substr(o.order_date, 1, 7)"},
     {"id": 18, "question": "各商品销量排名", "expected_sql": "SELECT p.product_name, ROUND(SUM(i.quantity), 2) FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id WHERE o.status = 'paid' GROUP BY p.product_name ORDER BY 2 DESC LIMIT 10"},
     {"id": 19, "question": "西南地区的退款率", "expected_sql": "SELECT ROUND(SUM(CASE WHEN o.status = 'refunded' THEN 1 ELSE 0 END) * 1.0 / COUNT(DISTINCT o.order_id), 4) FROM orders o JOIN regions r ON r.region_id = o.region_id WHERE r.region_name = '西南'"},
-    {"id": 20, "question": "数码品类的客单价", "expected_sql": "SELECT ROUND(SUM(o.pay_amount) * 1.0 / COUNT(DISTINCT o.order_id), 2) FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id WHERE o.status = 'paid' AND p.category = '数码'"}
+    {"id": 20, "question": "数码品类的客单价", "expected_sql": "SELECT ROUND(SUM(o.pay_amount) * 1.0 / COUNT(DISTINCT o.order_id), 2) FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id WHERE o.status = 'paid' AND p.category = '数码'"},
+    {"id": 21, "question": "各地区的客户数", "expected_sql": "SELECT r.region_name, ROUND(COUNT(DISTINCT c.customer_id), 2) FROM orders o JOIN customers c ON c.customer_id = o.customer_id JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' GROUP BY r.region_name"},
+    {"id": 22, "question": "有多少客户", "expected_sql": "SELECT ROUND(COUNT(DISTINCT c.customer_id), 2) FROM orders o JOIN customers c ON c.customer_id = o.customer_id WHERE o.status = 'paid'"}
   ]
 }

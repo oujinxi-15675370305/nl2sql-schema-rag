@@ -20,6 +20,8 @@ from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from typing import Deque, Iterable
 
+from app.slots import TIME_HINTS, leftover
+
 MAX_TURNS = 5  # AC-3.1：默认保留最近 5 轮
 MAX_SESSIONS = 200  # 进程内会话数上限，只防泄漏，不是业务限制
 
@@ -69,14 +71,33 @@ def _copy(slots: dict[str, list[str]] | None) -> dict[str, list[str]]:
     return out
 
 
+def _is_anaphoric(question: str) -> bool:
+    """判指代前先剥掉时间词。
+
+    不然"这个月退款率是多少"里的"这"会被当成"接着说"，新问题被套上上文的维度。
+    """
+    text = question
+    for word in TIME_HINTS:
+        text = text.replace(word, "")
+    return bool(ANAPHORA.search(text))
+
+
 def _should_inherit(question: str, current: dict[str, list[str]], previous: dict[str, list[str]]) -> bool:
     """这句算不算"接着说上文"。"""
     cur = set(current.get("metric", []))
     prev = set(previous.get("metric", []))
     if cur & prev:
         return True  # 同一个指标：可以接着补时间/地区/维度
-    # 换了指标或省略了指标：只有指代词才算承接，否则是新话题（AC-3.4）
-    return bool(ANAPHORA.search(question))
+    # 纯槽位的补充问法（"上个月"/"按品类看下"/"华南"）：省略主语也该接上，
+    # 但去掉槽位词后还剩新名词（"上个月工资发了多少"）就不能猜。
+    if (
+        not cur
+        and any(current.get(key) for key in ("dimension", "filter", "time"))
+        and not leftover(question)
+    ):
+        return True
+    # 换了指标或没给指标：只有指代词才算承接，否则是新话题（AC-3.4）
+    return _is_anaphoric(question)
 
 
 def _clears_dimension(question: str) -> bool:
@@ -168,30 +189,38 @@ class Turn:
 
 
 class Session:
-    """一次会话。只放内存里，进程结束就没了（AC-3.5）。"""
+    """一次会话。只放内存里，进程结束就没了（AC-3.5）。
+
+    `ThreadingHTTPServer` 下同一会话可能并发送达，读写都加锁。
+    """
 
     def __init__(self, session_id: str = "", max_turns: int = MAX_TURNS) -> None:
         self.id = session_id or uuid.uuid4().hex[:12]
         self.max_turns = max(1, max_turns)
         self.turns: Deque[Turn] = deque(maxlen=self.max_turns)
+        self._lock = threading.Lock()
 
     def add(self, question: str, slots: dict[str, list[str]]) -> Turn:
         turn = Turn(question=question, slots=_copy(slots))
-        self.turns.append(turn)  # 超上限自动淘汰最旧的（AC-3.5）
+        with self._lock:
+            self.turns.append(turn)  # 超上限自动淘汰最旧的（AC-3.5）
         return turn
 
     def last(self) -> Turn | None:
-        return self.turns[-1] if self.turns else None
+        with self._lock:
+            return self.turns[-1] if self.turns else None
 
     def last_slots(self) -> dict[str, list[str]] | None:
         turn = self.last()
         return _copy(turn.slots) if turn else None
 
     def clear(self) -> None:
-        self.turns.clear()
+        with self._lock:
+            self.turns.clear()
 
     def __len__(self) -> int:
-        return len(self.turns)
+        with self._lock:
+            return len(self.turns)
 
 
 class SessionStore:

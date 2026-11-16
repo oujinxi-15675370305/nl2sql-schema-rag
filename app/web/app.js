@@ -7,6 +7,10 @@ const sqlEl = $("#sql");
 const btnRun = $("#btn-run");
 const answerEl = $("#answer");
 const attemptsEl = $("#attempts");
+const rewriteEl = $("#rewrite");
+
+// M3：会话 id 由服务端下发；带上它才能接上文（"那上个月呢"）
+let sessionId = "";
 
 const SAMPLES = [
   "总GMV是多少",
@@ -120,6 +124,7 @@ async function run(question) {
   setState("生成中…", "loading");
   metaEl.textContent = "";
   sqlEl.textContent = "—";
+  rewriteEl.textContent = "";
   tableWrap.innerHTML = "";
   answerEl.innerHTML = "";
   attemptsEl.innerHTML = "";
@@ -129,13 +134,20 @@ async function run(question) {
     const res = await fetch("/api/ask", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question: q }),
+      body: JSON.stringify(sessionId ? { question: q, session_id: sessionId } : { question: q }),
     });
     const data = await res.json();
 
     if (!res.ok) {
       setState(`请求失败：${data.error || res.status}`, "error");
       return;
+    }
+
+    // 服务端可能新开一个会话，后续请求带上它
+    if (data.session_id) sessionId = data.session_id;
+    // M3：告诉用户这句被补了什么，不然"那上个月呢"的结果看着像凭空来的
+    if (data.inherited_slots && data.inherited_slots.length && data.rewritten_question) {
+      rewriteEl.textContent = `承接上文 → ${data.rewritten_question}`;
     }
 
     // M2：非 ask 不生成 SQL，页面显示意图话术而不是"失败"
@@ -170,6 +182,20 @@ async function run(question) {
 }
 
 btnRun.addEventListener("click", () => run());
+
+// M3：清空会话上下文，下一句当新问题（否则连点两个示例会互相继承槽位）
+$("#btn-new").addEventListener("click", () => {
+  sessionId = "";
+  rewriteEl.textContent = "";
+  answerEl.innerHTML = "";
+  attemptsEl.innerHTML = "";
+  sqlEl.textContent = "—";
+  tableWrap.innerHTML = "";
+  metaEl.textContent = "";
+  clearTags();
+  setState("已开启新会话", "info");
+});
+
 $("#q").addEventListener("keydown", (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key === "Enter") run();
 });

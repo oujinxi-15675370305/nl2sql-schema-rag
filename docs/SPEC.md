@@ -51,10 +51,11 @@
 ### M3 多轮追问（P1）
 
 - **AC-3.1**：会话保存最近 N 轮（默认 5）的"问题 + 解析出的槽位（指标/维度/筛选/时间）"。
-- **AC-3.2**：省略主语/时间时，从上文继承缺失槽位；显式给出的槽位覆盖上文。
+- **AC-3.2**：省略主语/时间时，从上文继承缺失槽位；显式给出的槽位覆盖上文（说"总/整体"且没有"各/按"时，视为显式要求不分组）。只补槽位、不带新主语的短句（"上个月""按品类看下""华南"）同样继承；句子里有新主语（"上个月工资发了多少"）则不猜，走澄清。
 - **AC-3.3**：用户说"换成华南""那上个月呢"能正确改写。
 - **AC-3.4**：新问题与上文无关（换了指标且无指代）时不继承，开新话题。
 - **AC-3.5**：会话有上限，超限淘汰最旧；不落盘（进程内即可）。
+- **AC-3.6**：顺序必须是 `session → 槽位继承 → classify → 生成`；`classify(question, catalog, slots)` 只接收槽位、不自己再抽一遍——先路由会把"那上个月呢"判成 clarify，多轮直接断。
 
 ### M4 权限与脱敏（P1）
 
@@ -75,22 +76,29 @@
 ```python
 # app/agent.py
 ask(question: str, *, catalog=None, retriever=None, generator=None,
-    use_llm: bool = True, max_repair: int = 2) -> SQLPlan
-# M3/M4 才会加：session=None, role: str = "analyst"
+    use_llm: bool = True, max_repair: int = 2, session=None) -> SQLPlan
+# M3 已加：session=None（app/session.py 的 Session）；M4 才会加：role: str = "analyst"
+
+# app/router.py（M3：槽位由调用方算好传进来，classify 不再自己抽取 —— AC-3.6）
+classify(question: str, catalog: Catalog, slots: dict[str, list[str]]) -> Route
 
 # app/domain.py
 SQLPlan: question, sql, ok, error, rows, columns, elapsed_ms,
-         context, keywords, attempts, engine, intent, reply, clarify_options
-# M3/M4 才会加：session_id, masked_columns
+         context, keywords, attempts, engine, intent, reply, clarify_options,
+         session_id, rewritten_question, inherited_slots
+# M3 已加：session_id / rewritten_question（补全继承槽位后的问句）/ inherited_slots
+# M4 才会加：masked_columns
 ```
 
 ```http
 POST /api/ask
-  { "question": "...", "use_llm": true }
+  { "question": "...", "use_llm": true, "session_id": "可选，不带就新开一个" }
   → { sql, ok, error, columns, rows, elapsed_ms, intent, reply,
-      clarify_options, engine, attempts, context, keywords }
+      clarify_options, engine, attempts, context, keywords,
+      session_id, rewritten_question, inherited_slots }
   # engine: rule | llm | custom，用来确认这次真的走了模型
-  # session_id / role 是 M3/M4 的预留字段，现在传了也会被忽略
+  # 把返回的 session_id 带回来就能接上文；不带就是单轮，行为与 M2 一致
+  # role 是 M4 的预留字段，现在传了也会被忽略
 GET /api/schema → 表/列/指标
 GET /api/eval   → 评测摘要
 GET /api/health → { ok, tables, metrics }
@@ -118,7 +126,7 @@ GET /api/health → { ok, tables, metrics }
 | M1 SQL 自我修复 | ✅ 已完成 | 9 条测试（含 error 清理 / engine / 超时回归）；`scripts/demo_repair.py` 可复现 |
 | M2 意图路由 | ✅ 已完成 | 13 条测试；槽位判澄清；非 ask 不生成 SQL，返回话术；前端已接 |
 | M1/M2 审核修复 | ✅ 已完成 | 2026-11-13 |
-| M3 多轮追问 | ⬜ 待做 | 开工前先读 review 文档 §6：槽位继承要在路由之前 |
+| M3 多轮追问 | ✅ 已完成 | 31 条测试（AC-3.1~3.6）；顺序 `session → 槽位继承 → classify → 生成`，classify 只收槽位；会话进程内、默认 5 轮 |
 | M4 权限与脱敏 | ⬜ 待做 | |
 | M5 评测扩容 + CI | ⬜ 待做 | 20 → 50 条 |
 

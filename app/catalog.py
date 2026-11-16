@@ -22,6 +22,7 @@ def load_catalog(path: str | Path | None = None) -> Catalog:
                 synonyms=tuple(c.get("synonyms", ())),
                 is_dimension=bool(c.get("is_dimension", False)),
                 is_measure=bool(c.get("is_measure", False)),
+                sensitive=bool(c.get("sensitive", False)),
             )
             for c in t.get("columns", [])
         )

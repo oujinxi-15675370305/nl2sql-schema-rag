@@ -134,6 +134,9 @@ button:hover, .ghost:hover { border-color: var(--accent); color: #cfe3ff; }
 .state.ok { color: var(--ok); }
 .state.info { color: var(--muted); }
 
+.rewrite { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.rewrite:not(:empty) { padding-left: 8px; border-left: 2px solid var(--accent); }
+
 .answer { font-size: 14px; line-height: 1.65; }
 .answer .reply { margin: 8px 0 6px; }
 .answer .options { margin: 4px 0 0 18px; padding: 0; color: var(--muted); font-size: 13px; }

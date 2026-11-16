@@ -15,11 +15,15 @@
 `ask()` 的调用顺序是 session → 槽位继承 → classify → 生成；如果这里再抽一遍原始问题，
 "那上个月呢" 会抽出空指标，被判成 clarify，多轮就断在第二轮。
 文本类判定（闲聊 / 写操作 / 超纲）仍然看原始问题，不看继承来的槽位。
+
+`denied_terms` 是当前角色看不到的列名/同义词（M4）：只用于把"我要看手机号"这类
+显式越权请求判成 unsafe（AC-4.2），不参与槽位抽取。
 """
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import Iterable
 
 from app.domain import Catalog
 
@@ -30,9 +34,12 @@ STRONG_WRITE = re.compile(
     re.I,
 )
 # 有歧义：只有祈使用法才算写操作。"被删除的订单""更新时间分布"是在读数据，放行。
+# "改成华南"是改写问句（M3 多轮），只有"把/将 … 改成/改为"才是改数据。
+# 注意 lookahead 里要写"除"：否则正则回溯到单字"删"时，会绕过"删除的"这层豁免。
 SOFT_WRITE = re.compile(
-    r"(?<!被)(?:删除|删掉|删了|删|更新|修改|改数|改成|改为|插入|导入)"
-    r"(?!的|后|前|过|时间|日期|状态|记录|标记)"
+    r"(?<!被)(?:删除|删掉|删了|删|更新|修改|改数|插入|导入)"
+    r"(?!的|后|前|过|时间|日期|状态|记录|标记|除)"
+    r"|(?:把|将)[^。？?!！]{0,12}(?:改成|改为)"
 )
 
 CHAT_WORDS = re.compile(
@@ -58,6 +65,7 @@ DIMENSION_LABELS = {
     "brand": "品牌",
     "order_date": "月份",
     "product_name": "商品",
+    "customer_name": "客户",
 }
 TIME_OPTIONS = "时间范围？本月 / 上个月 / 今年 / 去年 / 具体月份"
 
@@ -98,18 +106,26 @@ def _dimension_options(catalog: Catalog) -> str:
     return "按什么维度看？" + " / ".join(dict.fromkeys(labels))
 
 
-def _clarify_options(question: str, catalog: Catalog, keywords: dict[str, list[str]]) -> list[str]:
+def _clarify_options(question: str, catalog: Catalog, slots: dict[str, list[str]]) -> list[str]:
     options: list[str] = []
-    if not keywords["dimension"] and not keywords["filter"]:
+    if not slots["dimension"] and not slots["filter"]:
         options.append(_dimension_options(catalog))
     options.append(_metric_options(catalog))
-    if not keywords["time"]:
+    if not slots["time"]:
         options.append(TIME_OPTIONS)
     return options
 
 
-def classify(question: str, catalog: Catalog, keywords: dict[str, list[str]]) -> Route:
-    """`keywords` 必须是调用方算好的槽位（M3 里是继承之后的），这里不再重新抽取。"""
+def classify(
+    question: str,
+    catalog: Catalog,
+    slots: dict[str, list[str]],
+    denied_terms: Iterable[str] = (),
+) -> Route:
+    """`slots` 必须是调用方算好的槽位（M3 里是继承之后的），这里不再重新抽取。
+
+    `denied_terms` 是当前角色不可见列的列名/同义词（M4），命中即判 unsafe（AC-4.2）。
+    """
     q = question.strip()
 
     if not q:
@@ -121,12 +137,22 @@ def classify(question: str, catalog: Catalog, keywords: dict[str, list[str]]) ->
     if STRONG_WRITE.search(q) or SOFT_WRITE.search(q):
         return Route("unsafe", "包含写操作或导出请求")
 
+    # 1.5) 显式请求无权列：unsafe + 说明，不静默改列（AC-4.2）
+    #      话术里不带列名，避免把隐藏字段名回显出去（AC-4.1）。
+    low = q.lower()
+    if any(term and term.lower() in low for term in denied_terms):
+        return Route(
+            "unsafe",
+            "请求了无权访问的列",
+            reply="这个字段属于敏感信息，当前角色无权查看；可以换一个不含它的问法。",
+        )
+
     # 2) 整句都是客套话（剥掉寒暄后没剩下内容）
     if not CHAT_NOISE.sub("", CHAT_WORDS.sub("", q)).strip():
         return Route("chat", "闲聊或客套话")
 
     # 3) 问 schema 本身不是问数
-    if META_PATTERN.search(q) and not keywords["metric"]:
+    if META_PATTERN.search(q) and not slots["metric"]:
         return Route(
             "out_of_scope",
             "问的是表结构/字段，不是数据",
@@ -136,13 +162,13 @@ def classify(question: str, catalog: Catalog, keywords: dict[str, list[str]]) ->
     # 4) 与数据无关：超纲。这里只看字面——超纲词不能被继承来的槽位救回来
     if OFFTOPIC_WORDS.search(q) and not _has_data_hint(q, catalog):
         return Route("out_of_scope", "与数据仓库无关的问题")
-    if not _has_data_hint(q, catalog, keywords):
+    if not _has_data_hint(q, catalog, slots):
         return Route("out_of_scope", "没有识别到指标、表或维度", confidence=0.6)
 
     # 5) 有数据意图但抽不到指标：要澄清（AC-2.3）
-    if not keywords["metric"]:
+    if not slots["metric"]:
         return Route("clarify", "没有识别出指标，需要澄清",
-                     clarify_options=_clarify_options(q, catalog, keywords))
+                     clarify_options=_clarify_options(q, catalog, slots))
 
     # 6) 其余按问数处理
     return Route("ask", "识别到指标")

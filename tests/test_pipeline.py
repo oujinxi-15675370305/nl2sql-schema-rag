@@ -73,6 +73,17 @@ class GenerationTest(unittest.TestCase):
         sql = self._sql("各商品销量排名")
         self.assertIn("LIMIT 10", sql)
 
+    def test_customer_count_joins_customers(self) -> None:
+        # M4 前置：客户数走 customers 表，避免用订单数冒充客户数
+        sql = self._sql("各地区的客户数")
+        self.assertIn("COUNT(DISTINCT c.customer_id)", sql)
+        self.assertIn("JOIN customers c", sql)
+
+    def test_sensitive_column_only_when_asked(self) -> None:
+        # M4：只有明确点名才选敏感列；普通"各客户的GMV"不能顺手把手机号带出来
+        self.assertNotIn("customer_phone", self._sql("各客户的GMV"))
+        self.assertIn("customer_phone", self._sql("各客户的GMV和手机号"))
+
 
 class ValidatorTest(unittest.TestCase):
     @classmethod

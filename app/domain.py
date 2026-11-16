@@ -14,6 +14,7 @@ class Column:
     synonyms: tuple[str, ...] = ()
     is_dimension: bool = False
     is_measure: bool = False
+    sensitive: bool = False  # M4：敏感列（按角色隐藏或掩码）
 
     def text(self) -> str:
         parts = [self.name, self.comment, *self.synonyms]
@@ -129,3 +130,5 @@ class SQLPlan:
     session_id: str = ""  # M3：会话标识（没有会话时为空）
     rewritten_question: str = ""  # M3：补上继承槽位后的自包含问句
     inherited_slots: list[str] = field(default_factory=list)  # M3：本轮从上文继承的槽位名
+    role: str = "analyst"  # M4：本次请求的角色
+    masked_columns: list[str] = field(default_factory=list)  # M4：被服务端掩码的列

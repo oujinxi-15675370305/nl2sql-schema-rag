@@ -14,13 +14,14 @@ from app.domain import Catalog
 REGIONS = ("华东", "华南", "华北", "西南")
 CATEGORIES = ("家电", "数码", "服饰", "食品")
 
-# 规则生成器支持的五个指标 → 口语说法
+# 规则生成器支持的六个指标 → 口语说法
 METRIC_HINTS: dict[str, tuple[str, ...]] = {
     "gmv": ("成交", "销售额", "营收", "gmv", "交易额", "卖了多少"),
     "order_count": ("多少单", "订单数", "单量", "订单量", "多少订单"),
     "aov": ("客单价", "平均订单", "均价"),
     "refund_rate": ("退款率", "退货率"),
     "units": ("销量", "件数", "卖了多少件", "多少件"),
+    "customer_count": ("客户数", "客户数量", "多少客户", "多少个客户", "客户人数"),
 }
 
 DIMENSION_HINTS: dict[str, tuple[str, ...]] = {
@@ -29,9 +30,42 @@ DIMENSION_HINTS: dict[str, tuple[str, ...]] = {
     "brand": ("品牌",),
     "month": ("每月", "按月", "月份", "月度"),
     "product": ("商品", "产品", "单品"),
+    # 不能写光秃秃的"客户"："各地区的客户数"会被判成按客户分组
+    "customer": ("各客户", "每个客户", "每位客户", "按客户", "客户名", "客户名单"),
 }
 
 GROUP_INTENT = re.compile(r"(各|每|按|分|排名|top|分别|各地|各类|哪些)")
+
+TIME_HINTS = ("上个月", "上月", "本月", "这个月", "今年", "去年", "最近30天", "近30天")
+
+# 补充问法里允许出现的"不带新内容"的词：语气词、看/查这种动词、改写动词。
+# 注意只用来判断"这句是不是纯槽位"，不参与槽位抽取。
+FILLERS = re.compile(
+    r"(帮我看下|帮我看看|帮我|给我|请|麻烦|看一下|看下|看看|查一下|查下|看|查|改成|改为|一下"
+    r"|各|每|按|分|的|了|呢|吧|啊|吗|呀|那|这|个|和|与|再|来|下)+"
+)
+MONTH_RE = re.compile(r"20\d{2}-\d{1,2}")
+
+# 所有槽位词，长的在前，避免"销售额"被"销售"先截断
+SLOT_TERMS: tuple[str, ...] = tuple(sorted(
+    {h for hints in METRIC_HINTS.values() for h in hints}
+    | {h for hints in DIMENSION_HINTS.values() for h in hints}
+    | set(REGIONS) | set(CATEGORIES) | set(TIME_HINTS),
+    key=len,
+    reverse=True,
+))
+
+
+def leftover(question: str) -> str:
+    """去掉槽位词、时间词和语气/改写词之后剩下的内容。
+
+    空字符串表示这句只是在补槽位（"上个月" / "按品类看下" / "改成华南"），可以继承上文；
+    还剩"工资""新闻"这类新名词时不能瞎继承，交给路由去澄清。
+    """
+    text = MONTH_RE.sub("", question.lower())
+    for term in SLOT_TERMS:
+        text = text.replace(term, "")
+    return FILLERS.sub("", text).strip()
 
 
 def extract_keywords(question: str, catalog: Catalog) -> dict[str, list[str]]:

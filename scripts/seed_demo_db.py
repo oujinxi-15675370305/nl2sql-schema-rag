@@ -38,7 +38,8 @@ def build() -> None:
         CREATE TABLE customers (
             customer_id TEXT PRIMARY KEY,
             region_id INTEGER NOT NULL REFERENCES regions(region_id),
-            customer_name TEXT NOT NULL
+            customer_name TEXT NOT NULL,
+            customer_phone TEXT NOT NULL
         );
         CREATE TABLE products (
             product_id TEXT PRIMARY KEY,
@@ -70,10 +71,12 @@ def build() -> None:
     )
 
     cur.executemany("INSERT INTO regions(region_id, region_name) VALUES (?, ?)", REGIONS)
+    # 手机号用编号推导，不再消耗 rng：加列不会改变已有的订单数据（评测基准不漂）
     customers = [
-        (f"C{i:04d}", rng.choice([r[0] for r in REGIONS]), f"客户{i:04d}") for i in range(1, 121)
+        (f"C{i:04d}", rng.choice([r[0] for r in REGIONS]), f"客户{i:04d}", f"138{i:08d}")
+        for i in range(1, 121)
     ]
-    cur.executemany("INSERT INTO customers VALUES (?, ?, ?)", customers)
+    cur.executemany("INSERT INTO customers VALUES (?, ?, ?, ?)", customers)
 
     products = []
     pid = 1

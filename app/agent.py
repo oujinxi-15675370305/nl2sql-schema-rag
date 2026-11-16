@@ -11,7 +11,9 @@ import sqlite3
 import time
 import urllib.request
 from pathlib import Path
+from typing import Iterable
 
+from app import permissions
 from app.catalog import load_catalog
 from app.domain import Catalog, SchemaContext, SQLPlan
 from app.retrieval import SchemaRetriever
@@ -49,7 +51,9 @@ def _need_join(keywords: dict, metric: str) -> dict[str, bool]:
         f.startswith("category") for f in filters
     )
     need_regions = "region" in dims or any(f.startswith("region") for f in filters)
-    return {"items": need_items, "products": need_products, "regions": need_regions}
+    need_customers = metric == "customer_count" or "customer" in dims
+    return {"items": need_items, "products": need_products, "regions": need_regions,
+            "customers": need_customers}
 
 
 METRIC_SQL = {
@@ -58,7 +62,26 @@ METRIC_SQL = {
     "aov": "ROUND(SUM(o.pay_amount) * 1.0 / COUNT(DISTINCT o.order_id), 2)",
     "refund_rate": "ROUND(SUM(CASE WHEN o.status = 'refunded' THEN 1 ELSE 0 END) * 1.0 / COUNT(DISTINCT o.order_id), 4)",
     "units": "SUM(i.quantity)",
+    "customer_count": "COUNT(DISTINCT c.customer_id)",
 }
+
+
+def _requested_sensitive(question: str, catalog: Catalog) -> list[tuple[str, str]]:
+    """问题里明确点名的敏感列（按传入的 catalog 判断可见性）。
+
+    只有用户真的说"手机号/电话"时才把该列放进 SELECT；不主动带敏感列，
+    这样"各客户的 GMV"在 analyst/viewer 下是同一个结果。
+    """
+    hits: list[tuple[str, str]] = []
+    low = question.lower()
+    for table in catalog.tables:
+        for column in table.columns:
+            if not column.sensitive:
+                continue
+            terms = (column.name, *column.synonyms)
+            if any(term.lower() in low for term in terms):
+                hits.append((table.name, column.name))
+    return hits
 
 
 def _time_clause(hint: str) -> str:
@@ -85,6 +108,7 @@ def _group_expr(dim: str) -> tuple[str, str]:
         "brand": ("p.brand", "品牌"),
         "month": ("substr(o.order_date, 1, 7)", "月份"),
         "product": ("p.product_name", "商品"),
+        "customer": ("c.customer_name", "客户"),
     }[dim]
 
 
@@ -100,13 +124,21 @@ def rule_based_sql(question: str, catalog: Catalog, ctx: SchemaContext, keywords
     select_parts: list[str] = []
     group_expr = None
     alias = None
-    dims = [d for d in keywords["dimension"] if d in ("region", "category", "brand", "month", "product")]
+    dims = [d for d in keywords["dimension"]
+            if d in ("region", "category", "brand", "month", "product", "customer")]
     if dims:
         group_expr, alias = _group_expr(dims[0])
         select_parts.append(f"{group_expr} AS {alias}")
 
+    # M4：显式点名敏感列才选（可见性由调用方传入的 catalog 决定，viewer 这里根本看不到 phone）
+    for table_name, column in _requested_sensitive(question, catalog):
+        if table_name == "customers":
+            select_parts.append(f"c.{column}")
+            joins["customers"] = True
+
     metric_alias = {"gmv": "gmv", "order_count": "order_cnt", "aov": "aov",
-                    "refund_rate": "refund_rate", "units": "units"}[metric]
+                    "refund_rate": "refund_rate", "units": "units",
+                    "customer_count": "customer_cnt"}[metric]
     select_parts.append(f"ROUND({expr}, 2) AS {metric_alias}")
 
     from_clause = "orders o"
@@ -118,6 +150,8 @@ def rule_based_sql(question: str, catalog: Catalog, ctx: SchemaContext, keywords
         from_clause += " JOIN products p ON p.product_id = i.product_id"
     if joins["regions"]:
         from_clause += " JOIN regions r ON r.region_id = o.region_id"
+    if joins["customers"]:
+        from_clause += " JOIN customers c ON c.customer_id = o.customer_id"
 
     where: list[str] = []
     if metric != "refund_rate":
@@ -227,7 +261,17 @@ class ScriptedGenerator:
 FORBIDDEN = ("insert", "update", "delete", "drop", "alter", "create", "attach", "pragma", "vacuum")
 
 
-def validate(sql: str, catalog: Catalog, max_rows: int = 200) -> tuple[bool, str]:
+def validate(
+    sql: str,
+    catalog: Catalog,
+    max_rows: int = 200,
+    denied: Iterable[str] = (),
+) -> tuple[bool, str]:
+    """只读、单语句、表白名单；M4 起再加一层列白名单（AC-4.1）。
+
+    `denied` 是当前角色不可见的列名：命中即拒，且**话术里不带列名**，
+    否则"校验不通过"本身就成了泄漏通道（错误信息会被回传、被回显给模型）。
+    """
     s = sql.strip().rstrip(";")
     low = s.lower()
     if not low.startswith("select"):
@@ -237,6 +281,9 @@ def validate(sql: str, catalog: Catalog, max_rows: int = 200) -> tuple[bool, str
     for word in FORBIDDEN:
         if re.search(rf"\b{word}\b", low):
             return False, f"禁止的关键字：{word}"
+    for name in denied:
+        if name and re.search(rf"\b{re.escape(name.lower())}\b", low):
+            return False, "引用了无权访问的列"
     known = {t.name for t in catalog.tables}
     used = set(re.findall(r"\b(?:from|join)\s+([a-zA-Z_][a-zA-Z0-9_]*)", low))
     unknown = used - known
@@ -295,39 +342,55 @@ def ask(
     use_llm: bool = True,
     max_repair: int = 2,
     session: Session | None = None,
+    role: str = permissions.DEFAULT_ROLE,
 ) -> SQLPlan:
     """AC-1.1：失败带报错重试；AC-1.4：每次尝试都要过校验；AC-1.5：max_repair=0 只跑一次。
 
-    M3 的顺序（AC-3.6）：**session → 槽位继承 → classify → 生成**，不能先路由：
-    "那上个月呢"字面上没有指标，先路由会被判成 clarify。
+    顺序（AC-3.6）：
+    **role → 按角色裁剪 catalog → session 槽位继承 → classify → 检索/build_context → 生成**。
+    不能先路由："那上个月呢"字面上没有指标，先路由会被判成 clarify。
+    列过滤必须在检索之前，否则隐藏列会进 context / prompt（AC-4.1）。
     """
     started = time.time()
-    catalog = catalog or load_catalog()
+    full_catalog = catalog or load_catalog()
+    hidden = permissions.hidden_columns(full_catalog, role)  # 未知角色在这里抛 ValueError
+    catalog = permissions.visible_catalog(full_catalog, role)  # AC-4.1：不可见列根本不在 catalog 里
     retriever = retriever or SchemaRetriever(catalog)
     gen = generator if generator is not None else (LLMGenerator() if use_llm else RuleGenerator())
+    masked_names = permissions.masked_column_names(role)
 
-    # AC-3.1 / AC-3.2：取上文槽位，补齐这句缺的
+    # AC-3.1 / AC-3.2：取上文槽位，补齐这句缺的（槽位用裁剪后的 catalog 抽）
     previous = session.last_slots() if session is not None else None
     slots, inherited = inherit_slots(question, extract_keywords(question, catalog), previous)
     rewritten = rewrite_question(question, slots, inherited)
-    ctx, keywords = build_context(rewritten, catalog, retriever, keywords=slots)
     plan = SQLPlan(
         question=question,
-        context=ctx,
-        keywords=keywords,
+        keywords=slots,
         session_id=session.id if session is not None else "",
         rewritten_question=rewritten,
         inherited_slots=inherited,
+        role=role,
     )
     plan.attempts = []
 
-    route = classify(question, catalog, slots)  # AC-2.1 / AC-2.5 / AC-3.6：槽位由上面传进来
+    denied = permissions.denied_terms(full_catalog, role)
+    route = classify(question, catalog, slots, denied_terms=denied)  # AC-2.1 / AC-4.2
     plan.intent = route.intent
     if route.intent != "ask":  # AC-2.2：只有 ask 生成 SQL
         plan.reply = reply_for(route)
         plan.clarify_options = route.clarify_options
+        plan.context = None  # 非 ask 不检索、也不返回 schema（AC-4.1）
+        if route.intent == "unsafe":  # AC-4.4：越权/写操作尝试进审计
+            permissions.AUDIT_LOG.record(
+                role=role, question=question, session_id=plan.session_id, reason=route.reason
+            )
         plan.elapsed_ms = int((time.time() - started) * 1000)
         return plan
+
+    # 只有问数才检索，且检索用的是裁剪后的 catalog（AC-4.1）
+    ctx, keywords = build_context(rewritten, catalog, retriever, keywords=slots)
+    plan.context = ctx
+    plan.keywords = keywords
 
     if session is not None:
         session.add(question, slots)  # AC-3.1：只把真正问数的一轮记成上下文
@@ -335,16 +398,20 @@ def ask(
     feedback: str | None = None
     for attempt in range(max(0, max_repair) + 1):
         # 交给生成器的是改写后的自包含问句（M3）：模型和规则都不该自己猜上文
-        sql = gen(rewritten, ctx, catalog, feedback)  # AC-1.1：第二轮能拿到 feedback
+        raw_sql = gen(rewritten, ctx, catalog, feedback)  # AC-1.1：第二轮能拿到 feedback
+        # AC-4.1：回显/日志用打码后的 SQL，执行和校验仍用原句
+        sql = permissions.redact_sql(raw_sql, hidden) if raw_sql else raw_sql
         attempt_log: dict = {"n": attempt + 1, "sql": sql, "ok": False, "error": ""}
         plan.sql = sql
 
-        ok, message = validate(sql, catalog)  # AC-1.4：修复后的 SQL 也要校验
+        ok, message = validate(raw_sql, catalog, denied=hidden)  # AC-1.4 / AC-4.1
         timed_out = False
         if ok:
             try:
-                cols, rows = execute(sql)
+                cols, rows = execute(raw_sql)
+                rows, masked = permissions.mask_rows(cols, rows, masked_names)  # AC-4.3
                 plan.columns, plan.rows = cols, rows
+                plan.masked_columns = masked
                 plan.ok = True
                 plan.error = ""  # 修好之后不能把上一轮的报错留在返回值里
                 attempt_log["ok"] = True
@@ -355,6 +422,16 @@ def ask(
                 timed_out = True
             except Exception as exc:
                 message = f"执行失败：{exc}"
+        elif hidden and "无权访问" in message:
+            # AC-4.4：生成的 SQL 引用了不可见列，也算一次越权尝试
+            permissions.AUDIT_LOG.record(
+                role=role,
+                question=question,
+                session_id=plan.session_id,
+                reason="生成的 SQL 引用了无权访问的列",
+                sql=sql,
+            )
+            message = "引用了无权访问的列，请只使用可见字段"  # 不回传列名
         plan.ok = False
         plan.error = message
         attempt_log["error"] = message

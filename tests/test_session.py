@@ -8,7 +8,7 @@ from app.catalog import load_catalog
 from app.domain import Catalog
 from app.router import classify
 from app.session import MAX_TURNS, Session, SessionStore, inherit_slots, rewrite_question
-from app.slots import extract_keywords
+from app.slots import extract_keywords, leftover
 
 LAST_MONTH = "date('now','start of month','-1 month')"
 THIS_MONTH = "date('now','start of month')"
@@ -21,6 +21,21 @@ class SessionTestBase(unittest.TestCase):
 
     def follow(self, session: Session, question: str):
         return ask(question, catalog=self.catalog, use_llm=False, session=session)
+
+
+class LeftoverTest(unittest.TestCase):
+    """`leftover()` 决定"这句是不是纯槽位补充"，直接钉住它的判断。"""
+
+    def test_pure_slot_phrases_have_no_leftover(self) -> None:
+        for q in ("上个月", "按品类看下", "华南", "改成华南", "帮我改成华南", "2026-10", "那上个月呢"):
+            with self.subTest(q=q):
+                self.assertEqual(leftover(q), "")
+
+    def test_phrases_with_new_subject_keep_leftover(self) -> None:
+        # 反向用例：带新名词的句子不能算纯槽位，否则会继承出错误的指标
+        for q in ("上个月工资发了多少", "这个月表现怎么样"):
+            with self.subTest(q=q):
+                self.assertNotEqual(leftover(q), "")
 
 
 class SessionRecordTest(SessionTestBase):
@@ -111,6 +126,47 @@ class SlotInheritanceTest(SessionTestBase):
         self.assertEqual(merged, current)
         self.assertEqual(inherited, [])
 
+    def test_ac_3_2_time_only_followup_inherits(self) -> None:
+        # 回归：只说"上个月"也要接上，不能要求用户说成"那上个月呢"
+        session = Session()
+        self.follow(session, "各地区的GMV")
+        plan = self.follow(session, "上个月")
+
+        self.assertEqual(plan.intent, "ask")
+        self.assertEqual(plan.keywords["metric"], ["gmv"])
+        self.assertEqual(plan.keywords["time"], ["last_month"])
+        self.assertIn("metric", plan.inherited_slots)
+        self.assertIn(LAST_MONTH, plan.sql)
+
+    def test_ac_3_2_dimension_only_followup_inherits(self) -> None:
+        # 回归：只给维度（"按品类看下"）同样算补充，指标从上文继承
+        session = Session()
+        self.follow(session, "各地区的GMV")
+        plan = self.follow(session, "按品类看下")
+
+        self.assertEqual(plan.intent, "ask")
+        self.assertEqual(plan.keywords["metric"], ["gmv"])
+        self.assertEqual(plan.keywords["dimension"], ["category"])
+        self.assertIn("p.category AS 品类", plan.sql)
+
+    def test_ac_3_2_filter_only_followup_inherits(self) -> None:
+        # 回归：只给筛选值（"华南"）也要接上
+        session = Session()
+        self.follow(session, "各地区的GMV")
+        plan = self.follow(session, "华南")
+
+        self.assertEqual(plan.intent, "ask")
+        self.assertIn("r.region_name = '华南'", plan.sql)
+
+    def test_ac_3_2_unknown_subject_is_not_inherited(self) -> None:
+        # 反向用例：只有时间词、但主语是新名词（工资）时不能瞎继承成 GMV
+        session = Session()
+        self.follow(session, "各地区的GMV")
+        plan = self.follow(session, "上个月工资发了多少")
+
+        self.assertEqual(plan.intent, "clarify")
+        self.assertEqual(plan.sql, "")
+
 
 class RewriteTest(SessionTestBase):
     def test_ac_3_3_switch_region(self) -> None:
@@ -149,6 +205,28 @@ class RewriteTest(SessionTestBase):
         question = "各地区的GMV"
         slots = extract_keywords(question, self.catalog)
         self.assertEqual(rewrite_question(question, slots, []), question)
+
+    def test_ac_3_3_time_word_is_not_anaphora(self) -> None:
+        # 回归："这个月"里的"这"不算指代，新问题不能被加上"分地区"
+        session = Session()
+        self.follow(session, "各地区的GMV")
+        plan = self.follow(session, "这个月退款率是多少")
+
+        self.assertEqual(plan.intent, "ask")
+        self.assertEqual(plan.inherited_slots, [])
+        self.assertEqual(plan.keywords["dimension"], [])
+        self.assertIn("refund_rate", plan.sql)
+        self.assertNotIn("GROUP BY", plan.sql)
+
+    def test_ac_3_3_change_region_with_gai_cheng(self) -> None:
+        # 回归："改成华南"是改写请求，不能被 M2 的写操作规则拦成 unsafe
+        session = Session()
+        self.follow(session, "华东地区的GMV")
+        plan = self.follow(session, "改成华南")
+
+        self.assertEqual(plan.intent, "ask")
+        self.assertIn("r.region_name = '华南'", plan.sql)
+        self.assertNotIn("华东", plan.sql)
 
 
 class NewTopicTest(SessionTestBase):
@@ -195,8 +273,8 @@ class SessionLimitTest(SessionTestBase):
         self.assertEqual(session.turns[0].question, "问题3")
         self.assertEqual(session.turns[-1].question, f"问题{MAX_TURNS + 2}")
 
-    def test_ac_3_5_session_lives_in_memory_only(self) -> None:
-        # AC-3.5：不落盘——换个 store 就拿不到上一次的会话
+    def test_ac_3_5_new_store_does_not_share_state(self) -> None:
+        # AC-3.5：不落盘——换个 store / 直接新建同 id 的 Session 都拿不到上一次的会话
         store = SessionStore()
         session = store.get("abc")
         session.add("上个月的GMV", {"metric": ["gmv"]})
@@ -205,6 +283,7 @@ class SessionLimitTest(SessionTestBase):
 
         fresh = SessionStore()
         self.assertEqual(len(fresh.get("abc")), 0)
+        self.assertEqual(len(Session("abc")), 0)
 
     def test_ac_3_5_store_evicts_oldest_session(self) -> None:
         # 反向用例：狂刷 session_id 不能把内存打满
@@ -213,6 +292,28 @@ class SessionLimitTest(SessionTestBase):
         store.get("b")
         store.get("c")
         self.assertEqual(len(store), 2)
+
+    def test_ac_3_5_context_survives_eviction(self) -> None:
+        # 超过轮数上限后仍能接上文：存的是合并后的槽位，不是"最近一轮从零开始"
+        session = Session()
+        for _ in range(MAX_TURNS + 2):
+            self.follow(session, "上个月的GMV")
+        self.assertEqual(len(session), MAX_TURNS)
+
+        plan = self.follow(session, "各地区的GMV")
+        self.assertIn("time", plan.inherited_slots)
+        self.assertIn(LAST_MONTH, plan.sql)
+
+
+class SessionIsolationTest(SessionTestBase):
+    def test_two_sessions_do_not_share_slots(self) -> None:
+        # 反向用例：另一个会话的地区筛选不能漏进本会话
+        first, second = Session(), Session()
+        self.follow(first, "华东地区的GMV")
+
+        plan = self.follow(second, "上个月的GMV")
+        self.assertEqual(plan.inherited_slots, [])
+        self.assertNotIn("华东", plan.sql)
 
 
 class RoutingOrderTest(SessionTestBase):

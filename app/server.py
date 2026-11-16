@@ -5,18 +5,26 @@ import json
 import mimetypes
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
-from app.agent import ask, build_context
+from app.agent import ask
 from app.catalog import load_catalog
 from app.domain import Catalog
+from app.permissions import AUDIT_LOG, DEFAULT_ROLE, ROLES, visible_catalog
 from app.retrieval import SchemaRetriever
 from app.session import SessionStore
 
 WEB = Path(__file__).with_name("web")
 CATALOG: Catalog = load_catalog()
-RETRIEVER = SchemaRetriever(CATALOG)
+# M4：两个角色各一份裁剪后的 catalog + 检索索引，启动时建好（成本可忽略，别每次请求重建）
+CATALOGS: dict[str, Catalog] = {role: visible_catalog(CATALOG, role) for role in ROLES}
+RETRIEVERS: dict[str, SchemaRetriever] = {role: SchemaRetriever(c) for role, c in CATALOGS.items()}
 SESSIONS = SessionStore()  # M3：进程内会话，重启即清空
+
+
+def _role_of(raw: object) -> str:
+    role = str(raw or DEFAULT_ROLE).strip()
+    return role if role in ROLES else ""
 
 
 def _json(payload: dict, status: int = 200) -> tuple[int, str, bytes]:
@@ -38,20 +46,32 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
         if path == "/api/health":
-            status, ctype, body = _json({"ok": True, "tables": len(CATALOG.tables), "metrics": len(CATALOG.metrics)})
+            status, ctype, body = _json({"ok": True, "tables": len(CATALOG.tables),
+                                          "metrics": len(CATALOG.metrics), "roles": list(ROLES)})
             return self._send(status, ctype, body)
         if path == "/api/schema":
+            # M4：schema 也按角色裁剪，viewer 看不到敏感列
+            role = _role_of(parse_qs(parsed.query).get("role", [DEFAULT_ROLE])[0])
+            if not role:
+                return self._send(*_json({"ok": False, "error": "未知角色"}, 400))
+            catalog = CATALOGS[role]
             status, ctype, body = _json({
+                "role": role,
                 "tables": [
                     {"name": t.name, "comment": t.comment,
                      "columns": [{"name": c.name, "type": c.type, "comment": c.comment} for c in t.columns]}
-                    for t in CATALOG.tables
+                    for t in catalog.tables
                 ],
-                "metrics": [{"name": m.name, "comment": m.comment, "sql": m.sql} for m in CATALOG.metrics],
+                "metrics": [{"name": m.name, "comment": m.comment, "sql": m.sql} for m in catalog.metrics],
             })
             return self._send(status, ctype, body)
+        if path == "/api/audit":
+            # AC-4.4：越权尝试的只读出口（内存环形缓冲，不落盘）
+            entries = [entry.as_dict() for entry in AUDIT_LOG.entries()]
+            return self._send(*_json({"total": len(entries), "entries": entries}))
         if path == "/api/eval":
             from app.evals import run
             summary = run(verbose=False)
@@ -80,23 +100,32 @@ class Handler(BaseHTTPRequestHandler):
         if not question:
             return self._send(*_json({"ok": False, "error": "question 不能为空"}, 400))
 
+        # M4：角色按请求传，不进会话；未知角色直接 400，不静默降级
+        role = _role_of(payload.get("role"))
+        if not role:
+            return self._send(*_json(
+                {"ok": False, "error": f"未知角色：{payload.get('role')!r}（可选 {' / '.join(ROLES)}）"}, 400))
+
         # M3：前端没带 session_id 就新开一个，带回来就接着上文
         session = SESSIONS.get(str(payload.get("session_id") or "").strip() or None)
         plan = ask(
             question,
-            catalog=CATALOG,
-            retriever=RETRIEVER,
+            catalog=CATALOG,  # ask 内部按角色裁剪；这里传全量，隐藏列清单才算得出来
+            retriever=RETRIEVERS[role],
             use_llm=payload.get("use_llm", True),
             session=session,
+            role=role,
         )
         ctx, keywords = plan.context, plan.keywords
         body = {
             "question": question,
+            "role": plan.role,
             "sql": plan.sql,
             "ok": plan.ok,
             "error": plan.error,
             "columns": plan.columns,
             "rows": [list(r) for r in plan.rows],
+            "masked_columns": plan.masked_columns,
             "elapsed_ms": plan.elapsed_ms,
             "intent": plan.intent,
             "reply": plan.reply,
@@ -107,11 +136,12 @@ class Handler(BaseHTTPRequestHandler):
             "session_id": plan.session_id,
             "rewritten_question": plan.rewritten_question,
             "inherited_slots": plan.inherited_slots,
-            "context": {
-                "metrics": [{"key": h.key, "score": round(h.score, 4)} for h in (ctx.metrics if ctx else [])],
-                "tables": [{"key": h.key, "score": round(h.score, 4)} for h in (ctx.tables if ctx else [])],
+            # 非 ask 不返回 schema（AC-4.1，也省一次检索）
+            "context": None if ctx is None else {
+                "metrics": [{"key": h.key, "score": round(h.score, 4)} for h in ctx.metrics],
+                "tables": [{"key": h.key, "score": round(h.score, 4)} for h in ctx.tables],
                 "columns": [{"key": h.key, "table": h.payload.get("table"), "score": round(h.score, 4)}
-                            for h in (ctx.columns if ctx else [])],
+                            for h in ctx.columns],
             },
         }
         self._send(*_json(body))
