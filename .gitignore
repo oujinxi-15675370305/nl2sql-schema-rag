@@ -1,4 +1,4 @@
-﻿# Python
+# Python
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -19,6 +19,8 @@ data/*
 # 运行产物
 logs/
 *.log
+# CI 的评测 JSON（artifact，不提交）
+eval/last.json
 
 # 编辑器
 .idea/
