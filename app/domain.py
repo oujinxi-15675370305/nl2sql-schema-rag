@@ -117,6 +117,7 @@ class SQLPlan:
     sql: str = ""
     ok: bool = False
     error: str = ""
+    failure_stage: str = ""  # M5：最后一次失败发生在哪一步（validate/execute/timeout）；成功时清空
     rows: list[tuple] = field(default_factory=list)
     columns: list[str] = field(default_factory=list)
     elapsed_ms: int = 0

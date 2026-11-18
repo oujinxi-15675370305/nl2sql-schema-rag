@@ -7,8 +7,16 @@ from app.agent import ask
 from app.catalog import load_catalog
 from app.domain import Catalog
 from app.router import classify
-from app.session import MAX_TURNS, Session, SessionStore, inherit_slots, rewrite_question
-from app.slots import extract_keywords, leftover
+from app.session import (
+    DIMENSION_LABELS,
+    MAX_TURNS,
+    METRIC_LABELS,
+    Session,
+    SessionStore,
+    inherit_slots,
+    rewrite_question,
+)
+from app.slots import DIMENSION_HINTS, extract_keywords, leftover
 
 LAST_MONTH = "date('now','start of month','-1 month')"
 THIS_MONTH = "date('now','start of month')"
@@ -21,6 +29,28 @@ class SessionTestBase(unittest.TestCase):
 
     def follow(self, session: Session, question: str):
         return ask(question, catalog=self.catalog, use_llm=False, session=session)
+
+
+class LabelCoverageTest(unittest.TestCase):
+    """改写回环依赖"标签 → 词表"能对上；M4 加指标/维度时漏更新过一次。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.catalog = load_catalog()
+
+    def test_every_metric_label_round_trips(self) -> None:
+        for metric in self.catalog.metrics:
+            label = METRIC_LABELS.get(metric.name)
+            with self.subTest(metric=metric.name):
+                self.assertIsNotNone(label, f"缺指标标签：{metric.name}")
+                self.assertIn(metric.name, extract_keywords(f"{label}是多少", self.catalog)["metric"])
+
+    def test_every_dimension_label_round_trips(self) -> None:
+        for dim in DIMENSION_HINTS:
+            label = DIMENSION_LABELS.get(dim)
+            with self.subTest(dim=dim):
+                self.assertIsNotNone(label, f"缺维度标签：{dim}")
+                self.assertIn(dim, extract_keywords(f"{label}的GMV", self.catalog)["dimension"])
 
 
 class LeftoverTest(unittest.TestCase):
@@ -227,6 +257,28 @@ class RewriteTest(SessionTestBase):
         self.assertEqual(plan.intent, "ask")
         self.assertIn("r.region_name = '华南'", plan.sql)
         self.assertNotIn("华东", plan.sql)
+
+    def test_ac_3_3_customer_dimension_survives_followup(self) -> None:
+        # 回归（M4 引入）：新增的客户维度在改写后不能丢 JOIN / GROUP BY
+        session = Session()
+        self.follow(session, "各客户的订单数")
+        plan = self.follow(session, "那上个月呢")
+
+        self.assertEqual(plan.intent, "ask")
+        self.assertEqual(plan.keywords["dimension"], ["customer"])
+        self.assertIn("JOIN customers c", plan.sql)
+        self.assertIn("GROUP BY c.customer_name", plan.sql)
+        self.assertIn(LAST_MONTH, plan.sql)
+
+    def test_ac_3_3_customer_metric_survives_followup(self) -> None:
+        # 回归（M4 引入）：客户数指标在改写后仍然是 customer_count，不能靠检索碰运气
+        session = Session()
+        self.follow(session, "各地区的客户数")
+        plan = self.follow(session, "那上个月呢")
+
+        self.assertEqual(plan.keywords["metric"], ["customer_count"])
+        self.assertIn("customer_cnt", plan.sql)
+        self.assertNotIn("customer_count", plan.rewritten_question)  # 不能把内部标识符写进问句
 
 
 class NewTopicTest(SessionTestBase):

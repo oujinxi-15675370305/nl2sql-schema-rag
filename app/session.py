@@ -43,6 +43,7 @@ METRIC_LABELS = {
     "aov": "客单价",
     "refund_rate": "退款率",
     "units": "销量",
+    "customer_count": "客户数",
 }
 DIMENSION_LABELS = {
     "region": "各地区",
@@ -50,6 +51,7 @@ DIMENSION_LABELS = {
     "brand": "各品牌",
     "month": "按月",
     "product": "各商品",
+    "customer": "各客户",
 }
 TIME_LABELS = {
     "last_month": "上个月",

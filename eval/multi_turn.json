@@ -1,0 +1,40 @@
+{
+  "sessions": [
+    {
+      "id": "m1",
+      "note": "时间继承 + 维度覆盖：第二句只补时间，第三句只换维度，指标一直沿用订单数",
+      "turns": [
+        {"question": "各地区的订单数", "expected_sql": "SELECT r.region_name, ROUND(COUNT(DISTINCT o.order_id), 2) FROM orders o JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' GROUP BY r.region_name"},
+        {"question": "那上个月呢", "expected_sql": "SELECT r.region_name, ROUND(COUNT(DISTINCT o.order_id), 2) FROM orders o JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' AND o.order_date >= date('now','start of month','-1 month') AND o.order_date < date('now','start of month') GROUP BY r.region_name"},
+        {"question": "那各品类呢", "expected_sql": "SELECT p.category, ROUND(COUNT(DISTINCT o.order_id), 2) FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id WHERE o.status = 'paid' AND o.order_date >= date('now','start of month','-1 month') AND o.order_date < date('now','start of month') GROUP BY p.category"}
+      ]
+    },
+    {
+      "id": "m2",
+      "note": "筛选切换 + 显式不分组：第二句只换地区，第三句说「总共」要拆掉品类分组但保留地区筛选",
+      "turns": [
+        {"question": "各品类的GMV", "expected_sql": "SELECT p.category, ROUND(SUM(o.pay_amount), 2) FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id WHERE o.status = 'paid' GROUP BY p.category"},
+        {"question": "换成华南", "expected_sql": "SELECT p.category, ROUND(SUM(o.pay_amount), 2) FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' AND r.region_name = '华南' GROUP BY p.category"},
+        {"question": "那总共多少呢", "expected_sql": "SELECT ROUND(SUM(o.pay_amount), 2) FROM orders o JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' AND r.region_name = '华南'"}
+      ]
+    },
+    {
+      "id": "m3",
+      "note": "新话题不继承：第二句换了指标、没指代，不能套上第一句的地区分组；第三句再按时问承接退款率",
+      "turns": [
+        {"question": "各地区的GMV", "expected_sql": "SELECT r.region_name, ROUND(SUM(o.pay_amount), 2) FROM orders o JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' GROUP BY r.region_name"},
+        {"question": "上个月的退款率是多少", "expected_sql": "SELECT ROUND(SUM(CASE WHEN o.status = 'refunded' THEN 1 ELSE 0 END) * 1.0 / COUNT(DISTINCT o.order_id), 4) FROM orders o WHERE o.order_date >= date('now','start of month','-1 month') AND o.order_date < date('now','start of month')"},
+        {"question": "那今年呢", "expected_sql": "SELECT ROUND(SUM(CASE WHEN o.status = 'refunded' THEN 1 ELSE 0 END) * 1.0 / COUNT(DISTINCT o.order_id), 4) FROM orders o WHERE o.order_date >= date('now','start of year')"}
+      ]
+    },
+    {
+      "id": "m4",
+      "note": "筛选沿用 + 换维度：第二句换地区，第三句加品牌分组，地区筛选要保留",
+      "turns": [
+        {"question": "华东地区的GMV", "expected_sql": "SELECT ROUND(SUM(o.pay_amount), 2) FROM orders o JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' AND r.region_name = '华东'"},
+        {"question": "那华南呢", "expected_sql": "SELECT ROUND(SUM(o.pay_amount), 2) FROM orders o JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' AND r.region_name = '华南'"},
+        {"question": "各品牌呢", "expected_sql": "SELECT p.brand, ROUND(SUM(o.pay_amount), 2) FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' AND r.region_name = '华南' GROUP BY p.brand"}
+      ]
+    }
+  ]
+}

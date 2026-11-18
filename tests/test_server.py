@@ -68,6 +68,9 @@ class AskApiTest(unittest.TestCase):
         self.assertTrue(data["sql"].lower().startswith("select"))
         self.assertIn(data["engine"], ("rule", "llm", "custom"))
         self.assertGreaterEqual(len(data["attempts"]), 1)
+        # M5：attempts[].stage 与 failure_stage 进 HTTP 契约（失败分类靠它们）
+        self.assertEqual(data["failure_stage"], "")
+        self.assertEqual(data["attempts"][-1]["stage"], "ok")
 
     def test_session_round_trip(self) -> None:
         # AC-3.1 / AC-3.3：带上 session_id 就能接着上文，多轮不断
@@ -159,6 +162,16 @@ class AskApiTest(unittest.TestCase):
         self.assertEqual(entry["role"], "viewer")
         self.assertIn("无权访问", entry["reason"])
         self.assertNotIn("customer_phone", json.dumps(data, ensure_ascii=False))
+
+    def test_eval_endpoint_exposes_multi_turn_and_failure_summary(self) -> None:
+        # AC-5.5：/api/eval 只去掉明细，多轮与失败分类的汇总字段要留着
+        _, data = self._get("/api/eval")
+        self.assertNotIn("details", data)
+        self.assertNotIn("multi_turn_details", data)
+        self.assertIn("multi_turn_rate", data)
+        self.assertGreaterEqual(data["multi_turn_total"], 9)
+        self.assertIn("failure_counts", data)
+        self.assertEqual(data["exec_rate"], 1.0)
 
 
 if __name__ == "__main__":

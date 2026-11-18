@@ -96,21 +96,31 @@ def mask_value(value: object) -> str:
     return f"{text[:2]}***{text[-1:]}"
 
 
+PHONE_VALUE_RE = re.compile(r"^1\d{10}$")  # 值模式兜底：别名/表达式没拦住时也不回原值
+
+
 def mask_rows(
     columns: Sequence[str],
     rows: Iterable[Sequence[object]],
     masked: Iterable[str],
 ) -> tuple[list[tuple], list[str]]:
-    """在结果行上掩码，返回 (新行, 实际被掩的列名)。"""
+    """在结果行上掩码，返回 (新行, 实际被掩的列名)。
+
+    先按结果列名掩码；只要这个角色配了掩码列，再按"手机号形状"扫一遍值兜底——
+    生成器把列改名或包一层函数时，列名对不上，靠值这层仍然不会把真实号码带出去。
+    """
+    masked = tuple(masked)
     targets = {c for c in masked if c in set(columns)}
-    if not targets:
-        return [tuple(row) for row in rows], []
     indexes = [i for i, name in enumerate(columns) if name in targets]
     masked_rows = []
     for row in rows:
         values = list(row)
         for i in indexes:
             values[i] = mask_value(values[i])
+        if masked:
+            for i, value in enumerate(values):
+                if isinstance(value, str) and PHONE_VALUE_RE.match(value):
+                    values[i] = mask_value(value)
         masked_rows.append(tuple(values))
     return masked_rows, sorted(targets)
 

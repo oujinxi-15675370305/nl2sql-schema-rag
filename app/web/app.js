@@ -8,9 +8,12 @@ const btnRun = $("#btn-run");
 const answerEl = $("#answer");
 const attemptsEl = $("#attempts");
 const rewriteEl = $("#rewrite");
+const roleEl = $("#role");
 
 // M3：会话 id 由服务端下发；带上它才能接上文（"那上个月呢"）
 let sessionId = "";
+// M4：角色按请求传，服务端按角色裁剪 catalog；换角色等于换权限，顺手开新会话
+let role = roleEl ? roleEl.value : "analyst";
 
 const SAMPLES = [
   "总GMV是多少",
@@ -20,6 +23,8 @@ const SAMPLES = [
   "各商品销量排名",
   "退款率是多少",
   "华东地区的客单价",
+  "各地区的客户数",
+  "各客户的GMV和手机号",
 ];
 
 const INTENT_LABEL = {
@@ -134,7 +139,11 @@ async function run(question) {
     const res = await fetch("/api/ask", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(sessionId ? { question: q, session_id: sessionId } : { question: q }),
+      body: JSON.stringify({
+        question: q,
+        role,
+        ...(sessionId ? { session_id: sessionId } : {}),
+      }),
     });
     const data = await res.json();
 
@@ -172,7 +181,12 @@ async function run(question) {
     renderTable(data.columns, data.rows);
     sqlEl.textContent = data.sql;
     const tries = (data.attempts || []).length;
-    metaEl.textContent = `${data.rows.length} 行 · ${data.elapsed_ms} ms${tries > 1 ? ` · 第 ${tries} 次尝试成功` : ""}`;
+    // M4：服务端掩码过的列在这里点出来，避免把 138****0047 当成真实数据
+    const masked = (data.masked_columns || []).length
+      ? ` · 已掩码：${data.masked_columns.join(", ")}`
+      : "";
+    metaEl.textContent =
+      `${data.rows.length} 行 · ${data.elapsed_ms} ms${masked}${tries > 1 ? ` · 第 ${tries} 次尝试成功` : ""}`;
     setState("完成", "ok");
   } catch (err) {
     setState(`请求失败：${err.message}`, "error");
@@ -181,10 +195,7 @@ async function run(question) {
   }
 }
 
-btnRun.addEventListener("click", () => run());
-
-// M3：清空会话上下文，下一句当新问题（否则连点两个示例会互相继承槽位）
-$("#btn-new").addEventListener("click", () => {
+function resetView(stateText) {
   sessionId = "";
   rewriteEl.textContent = "";
   answerEl.innerHTML = "";
@@ -193,8 +204,26 @@ $("#btn-new").addEventListener("click", () => {
   tableWrap.innerHTML = "";
   metaEl.textContent = "";
   clearTags();
-  setState("已开启新会话", "info");
+  if (stateText) setState(stateText, "info");
+}
+
+function syncRole() {
+  role = roleEl.value;
+  $("#link-schema").href = `/api/schema?role=${encodeURIComponent(role)}`;
+}
+
+btnRun.addEventListener("click", () => run());
+
+// M3：清空会话上下文，下一句当新问题（否则连点两个示例会互相继承槽位）
+$("#btn-new").addEventListener("click", () => resetView("已开启新会话"));
+
+// M4：换角色 = 换可见列，顺手清掉上文，避免拿 analyst 的上下文去看 viewer 的结果
+roleEl.addEventListener("change", () => {
+  syncRole();
+  resetView(`角色：${roleEl.options[roleEl.selectedIndex].text}`);
 });
+
+syncRole();
 
 $("#q").addEventListener("keydown", (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key === "Enter") run();

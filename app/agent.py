@@ -65,6 +65,10 @@ METRIC_SQL = {
     "customer_count": "COUNT(DISTINCT c.customer_id)",
 }
 
+# 指标输出精度：退款率是小数，按 catalog 口径保留 4 位；
+# 统一套的外层 ROUND 不能把它再压成 2 位（0.125 → 0.13，评测会跟期望差一位）。
+METRIC_DECIMALS = {"refund_rate": 4}
+
 
 def _requested_sensitive(question: str, catalog: Catalog) -> list[tuple[str, str]]:
     """问题里明确点名的敏感列（按传入的 catalog 判断可见性）。
@@ -139,7 +143,8 @@ def rule_based_sql(question: str, catalog: Catalog, ctx: SchemaContext, keywords
     metric_alias = {"gmv": "gmv", "order_count": "order_cnt", "aov": "aov",
                     "refund_rate": "refund_rate", "units": "units",
                     "customer_count": "customer_cnt"}[metric]
-    select_parts.append(f"ROUND({expr}, 2) AS {metric_alias}")
+    decimals = METRIC_DECIMALS.get(metric, 2)
+    select_parts.append(f"ROUND({expr}, {decimals}) AS {metric_alias}")
 
     from_clause = "orders o"
     if joins["items"]:
@@ -266,11 +271,15 @@ def validate(
     catalog: Catalog,
     max_rows: int = 200,
     denied: Iterable[str] = (),
+    masked: Iterable[str] = (),
 ) -> tuple[bool, str]:
-    """只读、单语句、表白名单；M4 起再加一层列白名单（AC-4.1）。
+    """只读、单语句、表白名单；M4 起再加列白名单（AC-4.1）与掩码列约束（AC-4.3）。
 
     `denied` 是当前角色不可见的列名：命中即拒，且**话术里不带列名**，
     否则"校验不通过"本身就成了泄漏通道（错误信息会被回传、被回显给模型）。
+
+    `masked` 是当前角色"可见但要掩码"的列名：只允许裸列投影。改名、函数包裹、
+    拼接都会让结果列名/列值绕过按列名的掩码，所以在这里直接拒。
     """
     s = sql.strip().rstrip(";")
     low = s.lower()
@@ -281,9 +290,36 @@ def validate(
     for word in FORBIDDEN:
         if re.search(rf"\b{word}\b", low):
             return False, f"禁止的关键字：{word}"
+
+    denied = tuple(n for n in denied if n)
+    masked = tuple(n for n in masked if n)
+    # `*` 不含列名，白名单匹配不到；viewer 用 select * 就能把隐藏列整列带出来
+    if denied and (
+        re.search(r"\bselect\s+(?:distinct\s+)?\*", low)
+        or re.search(r"\b[a-z_][a-z0-9_]*\.\*", low)
+    ):
+        return False, "不允许用 * 查询，请明确指定字段"
     for name in denied:
-        if name and re.search(rf"\b{re.escape(name.lower())}\b", low):
+        if re.search(rf"\b{re.escape(name.lower())}\b", low):
             return False, "引用了无权访问的列"
+    for name in masked:
+        pat = re.escape(name.lower())
+        # 改别名：客户手机号 AS p
+        if re.search(rf"\b{pat}\b\s+as\s+[a-z_][a-z0-9_]*", low):
+            return False, "敏感字段不能改别名，请直接查询"
+        # 无 AS 的别名：客户手机号 p（排除 FROM/IS 这类关键字当"别名"）
+        if re.search(
+            rf"\b{pat}\b\s+(?!(?:from|where|group|order|limit|join|on|is|not|and|or|having|union|"
+            rf"collate|desc|asc)\b)[a-z_][a-z0-9_]*",
+            low,
+        ):
+            return False, "敏感字段不能改别名，请直接查询"
+        # 函数包裹 / 拼接：substr(customer_phone,...)、customer_phone || '-'
+        if re.search(rf"[a-z_][a-z0-9_]*\s*\([^)]*\b{pat}\b", low):
+            return False, "敏感字段不能参与函数或表达式"
+        if re.search(rf"\b{pat}\b\s*(?:\|\||\+|-|\*|/)", low):
+            return False, "敏感字段不能参与函数或表达式"
+
     known = {t.name for t in catalog.tables}
     used = set(re.findall(r"\b(?:from|join)\s+([a-zA-Z_][a-zA-Z0-9_]*)", low))
     unknown = used - known
@@ -401,12 +437,15 @@ def ask(
         raw_sql = gen(rewritten, ctx, catalog, feedback)  # AC-1.1：第二轮能拿到 feedback
         # AC-4.1：回显/日志用打码后的 SQL，执行和校验仍用原句
         sql = permissions.redact_sql(raw_sql, hidden) if raw_sql else raw_sql
-        attempt_log: dict = {"n": attempt + 1, "sql": sql, "ok": False, "error": ""}
+        # M5：stage 让失败分类有确定的信号，不用再靠 error 前缀猜（AC-5.3）
+        attempt_log: dict = {"n": attempt + 1, "sql": sql, "ok": False, "error": "",
+                             "stage": "validate"}
         plan.sql = sql
 
-        ok, message = validate(raw_sql, catalog, denied=hidden)  # AC-1.4 / AC-4.1
+        ok, message = validate(raw_sql, catalog, denied=hidden, masked=masked_names)  # AC-1.4 / AC-4.1 / AC-4.3
         timed_out = False
         if ok:
+            attempt_log["stage"] = "execute"  # 校验放行后，失败只可能发生在执行
             try:
                 cols, rows = execute(raw_sql)
                 rows, masked = permissions.mask_rows(cols, rows, masked_names)  # AC-4.3
@@ -414,12 +453,15 @@ def ask(
                 plan.masked_columns = masked
                 plan.ok = True
                 plan.error = ""  # 修好之后不能把上一轮的报错留在返回值里
+                plan.failure_stage = ""  # 同理：ok=True 时不能留着上一次的失败阶段
                 attempt_log["ok"] = True
+                attempt_log["stage"] = "ok"
                 plan.attempts.append(attempt_log)
                 break
             except QueryTimeout as exc:
                 message = f"执行失败：{exc}"
                 timed_out = True
+                attempt_log["stage"] = "timeout"
             except Exception as exc:
                 message = f"执行失败：{exc}"
         elif hidden and "无权访问" in message:
@@ -434,6 +476,7 @@ def ask(
             message = "引用了无权访问的列，请只使用可见字段"  # 不回传列名
         plan.ok = False
         plan.error = message
+        plan.failure_stage = attempt_log["stage"]  # 最后一轮的失败阶段（M5）
         attempt_log["error"] = message
         plan.attempts.append(attempt_log)
         if timed_out:

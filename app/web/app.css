@@ -91,6 +91,16 @@ button, .ghost {
   text-decoration: none;
   transition: .15s;
 }
+.role-select {
+  font: inherit;
+  cursor: pointer;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--text);
+  padding: 7px 10px;
+}
+.role-select:hover { border-color: var(--accent); }
 button:hover, .ghost:hover { border-color: var(--accent); color: #cfe3ff; }
 
 .chip { font-size: 12px; padding: 5px 10px; border-radius: 999px; color: var(--muted); }

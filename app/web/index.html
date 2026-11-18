@@ -14,9 +14,13 @@
       <span class="sub">自然语言 → 检索 schema → 生成 SQL → 校验 → 执行</span>
     </div>
     <div class="right">
+      <select id="role" class="role-select" title="角色（决定可见列）">
+        <option value="analyst">分析师</option>
+        <option value="viewer">只读访客</option>
+      </select>
       <button id="btn-new" class="ghost">新会话</button>
       <button id="btn-eval" class="ghost">跑评测</button>
-      <a class="ghost" href="/api/schema" target="_blank">看 schema</a>
+      <a id="link-schema" class="ghost" href="/api/schema">看 schema</a>
     </div>
   </header>
 

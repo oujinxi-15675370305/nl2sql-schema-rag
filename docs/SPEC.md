@@ -64,6 +64,8 @@
 - **AC-4.3**：脱敏列（如手机号）返回掩码，且掩码在服务端完成，不依赖前端。
 - **AC-4.4**：越权尝试写审计日志（内存环形缓冲即可）。
 
+> 实现说明（2026-11-16）：角色策略 = **隐藏列 + 掩码列**；敏感列默认隐藏，必须显式配 `masked` 才可见——等价于最小权限白名单，新增敏感列"不配置就不可见"。列白名单落在 `validate`（`denied=`），`denied` 非空时禁 `select *` / `表.*`；掩码列只允许裸列投影（别名/函数/拼接在校验阶段拒，结果行另有手机号值模式兜底）。错误话术不带列名，`attempts[].sql` 打码；非 ask 不再返回 `context`。
+
 ### M5 评测与 CI（P0）
 
 - **AC-5.1**：用例 ≥ 50 条，覆盖 5 个指标 × 4 个维度 × 3 类时间过滤。
@@ -76,32 +78,39 @@
 ```python
 # app/agent.py
 ask(question: str, *, catalog=None, retriever=None, generator=None,
-    use_llm: bool = True, max_repair: int = 2, session=None) -> SQLPlan
-# M3 已加：session=None（app/session.py 的 Session）；M4 才会加：role: str = "analyst"
+    use_llm: bool = True, max_repair: int = 2, session=None,
+    role: str = "analyst") -> SQLPlan
+# M3 已加：session=None（app/session.py 的 Session）
+# M4 已加：role（analyst / viewer；未知角色抛 ValueError，HTTP 层 400）
 
 # app/router.py（M3：槽位由调用方算好传进来，classify 不再自己抽取 —— AC-3.6）
-classify(question: str, catalog: Catalog, slots: dict[str, list[str]]) -> Route
+classify(question: str, catalog: Catalog, slots: dict[str, list[str]],
+         denied_terms: Iterable[str] = ()) -> Route
+# M4 已加：denied_terms = 当前角色不可见列的列名/同义词，命中即判 unsafe（AC-4.2）
 
 # app/domain.py
 SQLPlan: question, sql, ok, error, rows, columns, elapsed_ms,
          context, keywords, attempts, engine, intent, reply, clarify_options,
-         session_id, rewritten_question, inherited_slots
+         session_id, rewritten_question, inherited_slots, role, masked_columns
 # M3 已加：session_id / rewritten_question（补全继承槽位后的问句）/ inherited_slots
-# M4 才会加：masked_columns
+# M4 已加：role / masked_columns（服务端结果行上被掩码的列）
 ```
 
 ```http
 POST /api/ask
-  { "question": "...", "use_llm": true, "session_id": "可选，不带就新开一个" }
-  → { sql, ok, error, columns, rows, elapsed_ms, intent, reply,
+  { "question": "...", "use_llm": true, "session_id": "可选，不带就新开一个",
+    "role": "analyst|viewer，默认 analyst" }
+  → { sql, ok, error, columns, rows, masked_columns, elapsed_ms, intent, reply,
       clarify_options, engine, attempts, context, keywords,
-      session_id, rewritten_question, inherited_slots }
+      session_id, rewritten_question, inherited_slots, role }
   # engine: rule | llm | custom，用来确认这次真的走了模型
   # 把返回的 session_id 带回来就能接上文；不带就是单轮，行为与 M2 一致
-  # role 是 M4 的预留字段，现在传了也会被忽略
-GET /api/schema → 表/列/指标
+  # 非 ask 时 context 为 null（不检索、不泄漏 schema）
+  # 未知 role 返回 400
+GET /api/schema?role=analyst|viewer → 按角色裁剪后的表/列/指标
 GET /api/eval   → 评测摘要
-GET /api/health → { ok, tables, metrics }
+GET /api/audit  → { total, entries }：越权尝试（内存环形缓冲）
+GET /api/health → { ok, tables, metrics, roles }
 ```
 
 ## 5. 质量门槛（不过不许提交）
@@ -126,9 +135,9 @@ GET /api/health → { ok, tables, metrics }
 | M1 SQL 自我修复 | ✅ 已完成 | 9 条测试（含 error 清理 / engine / 超时回归）；`scripts/demo_repair.py` 可复现 |
 | M2 意图路由 | ✅ 已完成 | 13 条测试；槽位判澄清；非 ask 不生成 SQL，返回话术；前端已接 |
 | M1/M2 审核修复 | ✅ 已完成 | 2026-11-13 |
-| M3 多轮追问 | ✅ 已完成 | 31 条测试（AC-3.1~3.6）；顺序 `session → 槽位继承 → classify → 生成`，classify 只收槽位；会话进程内、默认 5 轮 |
-| M4 权限与脱敏 | ⬜ 待做 | |
-| M5 评测扩容 + CI | ⬜ 待做 | 20 → 50 条 |
+| M3 多轮追问 | ✅ 已完成 | 35 条测试（AC-3.1~3.6，含标签覆盖/客户维度回环）；顺序 `session → 槽位继承 → classify → 生成`，classify 只收槽位；会话进程内、默认 5 轮 |
+| M4 权限与脱敏 | ✅ 已完成 | 29 条权限测试 + 7 条 HTTP 契约；顺序 `role → 裁剪 catalog → 槽位 → classify → 检索/生成`；列白名单（含禁 `*`）、裸投影掩码 + 值兜底、审计；2026-11-16 审核补了两条绕过路径 |
+| M5 评测扩容 + CI | ⬜ 待做 | 22 → 50 条 |
 
 ## 8. 开发约定
 

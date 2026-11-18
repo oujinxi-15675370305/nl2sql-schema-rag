@@ -76,6 +76,7 @@ class Handler(BaseHTTPRequestHandler):
             from app.evals import run
             summary = run(verbose=False)
             summary.pop("details", None)
+            summary.pop("multi_turn_details", None)  # 只留汇总；multi_turn_rate 等字段要保留
             status, ctype, body = _json(summary)
             return self._send(status, ctype, body)
 
@@ -123,6 +124,7 @@ class Handler(BaseHTTPRequestHandler):
             "sql": plan.sql,
             "ok": plan.ok,
             "error": plan.error,
+            "failure_stage": plan.failure_stage,
             "columns": plan.columns,
             "rows": [list(r) for r in plan.rows],
             "masked_columns": plan.masked_columns,

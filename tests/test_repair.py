@@ -91,6 +91,31 @@ class RepairTest(unittest.TestCase):
         self.assertIn("secret_table", plan.error)
         self.assertEqual(plan.rows, [])
 
+    def test_attempts_record_stage_and_repair_clears_failure_stage(self) -> None:
+        # M5（AC-5.3 前置）：每次尝试记录 stage；修复成功后不能留下失败阶段
+        plan = ask("多少单", catalog=self.catalog,
+                   generator=ScriptedGenerator([TYPO_SQL, GOOD_SQL]), max_repair=1)
+        self.assertEqual([a["stage"] for a in plan.attempts], ["execute", "ok"])
+        self.assertTrue(plan.ok)
+        self.assertEqual(plan.failure_stage, "")
+
+    def test_failure_stage_for_validate(self) -> None:
+        # 表名校验失败发生在 validate，不该算成执行错
+        plan = ask("多少单", catalog=self.catalog,
+                   generator=ScriptedGenerator(["SELECT * FROM secret_table LIMIT 1"]), max_repair=0)
+        self.assertEqual(plan.attempts[0]["stage"], "validate")
+        self.assertEqual(plan.failure_stage, "validate")
+
+    def test_failure_stage_for_timeout(self) -> None:
+        # 超时单独记 timeout：超时和执行语法错误要能分开统计
+        runaway = "SELECT COUNT(*) FROM orders a, orders b, orders c, orders d"
+        with mock.patch("app.agent.QUERY_TIMEOUT_S", 0.2):
+            plan = ask("多少单", catalog=self.catalog,
+                       generator=ScriptedGenerator([runaway]), max_repair=2)
+        self.assertEqual(plan.attempts[0]["stage"], "timeout")
+        self.assertEqual(plan.failure_stage, "timeout")
+        self.assertEqual(len(plan.attempts), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

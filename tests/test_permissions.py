@@ -103,6 +103,30 @@ class ColumnWhitelistTest(unittest.TestCase):
         self.assertTrue(plan.ok)
         self.assertEqual(plan.masked_columns, ["customer_phone"])
 
+    def test_ac_4_1_viewer_select_star_is_rejected(self) -> None:
+        # 回归：* 不含列名，白名单匹配不到它；viewer 不能靠它把隐藏列带出来
+        for sql in ("SELECT * FROM customers LIMIT 2", "SELECT c.* FROM customers c LIMIT 2"):
+            with self.subTest(sql=sql):
+                plan = ask("各客户的GMV", role=VIEWER, generator=ScriptedGenerator([sql]), max_repair=0)
+                self.assertFalse(plan.ok)
+                self.assertIn("明确指定字段", plan.error)
+                self.assertEqual(plan.rows, [])
+                self.assertNotIn("customer_phone", json.dumps(plan.attempts, ensure_ascii=False))
+
+    def test_ac_4_1_reverse_count_star_and_analyst_star(self) -> None:
+        # 反向用例：count(*) 不是"查所有列"；analyst 的 * 仍可用，只是手机号会被掩码
+        viewer = ask("各客户的GMV", role=VIEWER,
+                     generator=ScriptedGenerator(["SELECT COUNT(*) FROM orders"]), max_repair=0)
+        self.assertTrue(viewer.ok)
+
+        analyst = ask("各客户的GMV", role=ANALYST,
+                      generator=ScriptedGenerator(["SELECT * FROM customers LIMIT 2"]), max_repair=0)
+        self.assertTrue(analyst.ok)
+        self.assertIn("customer_phone", analyst.columns)
+        self.assertIn("customer_phone", analyst.masked_columns)
+        index = analyst.columns.index("customer_phone")
+        self.assertRegex(analyst.rows[0][index], PHONE_RE)
+
 
 class ViewerTest(unittest.TestCase):
     @classmethod
@@ -193,6 +217,28 @@ class MaskingTest(unittest.TestCase):
         self.assertEqual(hit, ["customer_phone"])
         # 没命中就不改行
         self.assertEqual(mask_rows(["a"], [(1,)], ("customer_phone",)), ([(1,)], []))
+
+    def test_ac_4_3_alias_and_expression_are_rejected(self) -> None:
+        # 回归：改名/函数包裹会让按列名的掩码失效，必须在校验阶段拒
+        for sql in (
+            "SELECT c.customer_phone AS p FROM customers c LIMIT 2",
+            "SELECT c.customer_phone p FROM customers c LIMIT 2",
+            "SELECT substr(c.customer_phone,1,11) AS p FROM customers c LIMIT 2",
+            "SELECT c.customer_phone || '-' AS p FROM customers c LIMIT 2",
+        ):
+            with self.subTest(sql=sql):
+                plan = ask("各客户的GMV", role=ANALYST,
+                           generator=ScriptedGenerator([sql]), max_repair=0)
+                self.assertFalse(plan.ok)
+                self.assertIn("敏感字段", plan.error)
+                self.assertNotIn("customer_phone", plan.error)
+                self.assertEqual(plan.rows, [])
+
+    def test_ac_4_3_value_backstop_masks_even_when_column_name_is_lost(self) -> None:
+        # 兜底：即使列名丢了（极端 SQL），结果里的手机号形状也不能原样返回
+        rows, hit = mask_rows(["p"], [("13800000001",), ("客户A",)], ("customer_phone",))
+        self.assertEqual(rows, [("138****0001",), ("客户A",)])
+        self.assertEqual(hit, [])
 
 
 class AuditTest(unittest.TestCase):

@@ -79,6 +79,13 @@ class GenerationTest(unittest.TestCase):
         self.assertIn("COUNT(DISTINCT c.customer_id)", sql)
         self.assertIn("JOIN customers c", sql)
 
+    def test_refund_rate_keeps_four_decimals(self) -> None:
+        # 口径是 4 位小数（catalog / 期望 SQL 都是 4 位），外层 ROUND 不能压回 2 位：
+        # 0.125 被二次舍入成 0.13，评测就会跟期望差一位（AC-5.1 扩用例时踩到）
+        sql = self._sql("各品类的退款率")
+        self.assertIn(", 4), 4)", sql)
+        self.assertNotIn(", 4), 2)", sql)
+
     def test_sensitive_column_only_when_asked(self) -> None:
         # M4：只有明确点名才选敏感列；普通"各客户的GMV"不能顺手把手机号带出来
         self.assertNotIn("customer_phone", self._sql("各客户的GMV"))
