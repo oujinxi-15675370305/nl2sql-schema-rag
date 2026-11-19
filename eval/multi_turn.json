@@ -35,6 +35,33 @@
         {"question": "那华南呢", "expected_sql": "SELECT ROUND(SUM(o.pay_amount), 2) FROM orders o JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' AND r.region_name = '华南'"},
         {"question": "各品牌呢", "expected_sql": "SELECT p.brand, ROUND(SUM(o.pay_amount), 2) FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' AND r.region_name = '华南' GROUP BY p.brand"}
       ]
+    },
+    {
+      "id": "m5",
+      "note": "澄清轮不污染上下文：中间一轮被判 clarify（不记入会话），第三句仍能接第一句",
+      "turns": [
+        {"question": "各地区的GMV", "expected_sql": "SELECT r.region_name, ROUND(SUM(o.pay_amount), 2) FROM orders o JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' GROUP BY r.region_name"},
+        {"question": "看下业绩", "expected_intent": "clarify"},
+        {"question": "那上个月呢", "expected_sql": "SELECT r.region_name, ROUND(SUM(o.pay_amount), 2) FROM orders o JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' AND o.order_date >= date('now','start of month','-1 month') AND o.order_date < date('now','start of month') GROUP BY r.region_name"}
+      ]
+    },
+    {
+      "id": "m6",
+      "note": "客户维度/指标回环：M4 的 P0 就出在这里（加 customer 维度时改写标签漏更，多轮丢 GROUP BY）",
+      "turns": [
+        {"question": "各客户的GMV排名", "expected_sql": "SELECT c.customer_name, ROUND(SUM(o.pay_amount), 2) FROM orders o JOIN customers c ON c.customer_id = o.customer_id WHERE o.status = 'paid' GROUP BY c.customer_name ORDER BY 2 DESC LIMIT 10"},
+        {"question": "那上个月呢", "expected_sql": "SELECT c.customer_name, ROUND(SUM(o.pay_amount), 2) FROM orders o JOIN customers c ON c.customer_id = o.customer_id WHERE o.status = 'paid' AND o.order_date >= date('now','start of month','-1 month') AND o.order_date < date('now','start of month') GROUP BY c.customer_name ORDER BY 2 DESC LIMIT 20"},
+        {"question": "各品类呢", "expected_sql": "SELECT p.category, ROUND(SUM(o.pay_amount), 2) FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id WHERE o.status = 'paid' AND o.order_date >= date('now','start of month','-1 month') AND o.order_date < date('now','start of month') GROUP BY p.category ORDER BY 2 DESC LIMIT 20"}
+      ]
+    },
+    {
+      "id": "m7",
+      "note": "改写说法「改成华南」：M2/M3 修过它曾被当写操作拦成 unsafe",
+      "turns": [
+        {"question": "华东地区的GMV", "expected_sql": "SELECT ROUND(SUM(o.pay_amount), 2) FROM orders o JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' AND r.region_name = '华东'"},
+        {"question": "改成华南", "expected_sql": "SELECT ROUND(SUM(o.pay_amount), 2) FROM orders o JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' AND r.region_name = '华南'"},
+        {"question": "那上个月呢", "expected_sql": "SELECT ROUND(SUM(o.pay_amount), 2) FROM orders o JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' AND r.region_name = '华南' AND o.order_date >= date('now','start of month','-1 month') AND o.order_date < date('now','start of month')"}
+      ]
     }
   ]
 }

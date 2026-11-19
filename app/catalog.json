@@ -64,7 +64,7 @@
     {"name": "gmv", "comment": "成交总额：已支付订单的实付金额之和", "synonyms": ["GMV", "gmv", "成交额", "销售额", "营收", "交易额"], "requires": ["orders.pay_amount"], "sql": "SUM(o.pay_amount)"},
     {"name": "order_count", "comment": "订单数：已支付订单的数量", "synonyms": ["订单数", "单量", "订单量", "多少单"], "requires": ["orders.order_id"], "sql": "COUNT(DISTINCT o.order_id)"},
     {"name": "aov", "comment": "客单价：成交总额 / 订单数", "synonyms": ["客单价", "平均订单金额", "均价"], "requires": ["orders.pay_amount"], "sql": "ROUND(SUM(o.pay_amount) * 1.0 / COUNT(DISTINCT o.order_id), 2)"},
-    {"name": "refund_rate", "comment": "退款率：退款订单数 / 已支付订单数", "synonyms": ["退款率", "退货率"], "requires": ["orders.refund_amount"], "sql": "ROUND(SUM(CASE WHEN o.status = 'refunded' THEN 1 ELSE 0 END) * 1.0 / COUNT(DISTINCT o.order_id), 4)"},
+    {"name": "refund_rate", "comment": "退款率：退款订单数 / 全部订单数（按订单当前状态统计）", "synonyms": ["退款率", "退货率"], "requires": ["orders.refund_amount"], "sql": "ROUND(SUM(CASE WHEN o.status = 'refunded' THEN 1 ELSE 0 END) * 1.0 / COUNT(DISTINCT o.order_id), 4)"},
     {"name": "units", "comment": "销量：商品件数之和", "synonyms": ["销量", "件数", "卖了多少件"], "requires": ["order_items.quantity"], "sql": "SUM(i.quantity)"},
     {"name": "customer_count", "comment": "客户数：有成交的客户数（按客户去重）", "synonyms": ["客户数", "客户数量", "多少客户", "多少个客户", "客户人数"], "requires": ["customers.customer_id"], "sql": "COUNT(DISTINCT c.customer_id)"}
   ]

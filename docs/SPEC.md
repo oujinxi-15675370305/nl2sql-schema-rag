@@ -68,10 +68,21 @@
 
 ### M5 评测与 CI（P0）
 
-- **AC-5.1**：用例 ≥ 50 条，覆盖 5 个指标 × 4 个维度 × 3 类时间过滤。
-- **AC-5.2**：主指标为执行结果一致率，阈值 ≥ 85%；低于阈值退出码 1。
-- **AC-5.3**：输出"失败分类"（检索未命中 / 生成语法错 / 字段不存在 / 结果不一致）。
-- **AC-5.4**：CI 跑单测 + 评测，任一失败即红。
+- **AC-5.1**：用例 ≥ 50 条（现 57：50 条问数 + 7 条意图/越权）；6 个指标、6 个维度都至少出现一次，指标×维度组合 ≥ 31/36
+  （customer 维度按客户分组语义特殊，只留 1 条连通性用例，不铺满 6 条）；时间过滤覆盖 ≥ 5 类
+  （现 6 类：上个月 / 本月 / 今年 / 去年 / 最近 30 天 / 指定月份）；非问数意图 chat / clarify /
+  out_of_scope / unsafe 各至少 1 条（含 1 条 viewer 越权），否则"意图命中率"没有意义。
+- **AC-5.2**：主指标为执行结果一致率；SPEC 门槛 ≥ 85%，CI 按 ≥ 90% 卡，低于阈值退出码 1。
+- **AC-5.3**：输出失败分类：`routed`（路由拦截）/ `permission`（权限）/ `validate`（校验）/
+  `field`（字段不存在）/ `syntax`（生成语法错）/ `timeout`（执行超时）/ `retrieval`（检索未命中）/
+  `result`（结果不一致）/ `intent`（意图不符）。每条用例带 `failure`，`summary.failure_counts` 与
+  `summary.multi_turn_failure_counts` 分别汇总；分类先看 `attempts[].stage`，只有执行阶段再按错误码
+  区分 `field` / `syntax`。
+- **AC-5.4**：CI 跑单测 + 评测（单轮 / 意图 / 多轮三个门槛），任一失败即红；`timeout-minutes` 兜底，
+  评测 JSON 作为 artifact 上传，失败时能直接看哪条挂了。
+- **AC-5.5**：多轮评测独立文件 `eval/multi_turn.json`（≥ 3 个会话 × ≥ 3 轮，现 7 × 3 = 21，含客户维度回环与
+  "改成华南"改写），用同一个 `Session` 顺序跑、逐轮比执行结果；指标为 `multi_turn_rate`，
+  **不并入**单轮 `exec_rate`（否则历史数字不可比）。
 
 ## 4. 契约（公开接口，改动需改本文件）
 
@@ -89,26 +100,29 @@ classify(question: str, catalog: Catalog, slots: dict[str, list[str]],
 # M4 已加：denied_terms = 当前角色不可见列的列名/同义词，命中即判 unsafe（AC-4.2）
 
 # app/domain.py
-SQLPlan: question, sql, ok, error, rows, columns, elapsed_ms,
+SQLPlan: question, sql, ok, error, failure_stage, rows, columns, elapsed_ms,
          context, keywords, attempts, engine, intent, reply, clarify_options,
          session_id, rewritten_question, inherited_slots, role, masked_columns
 # M3 已加：session_id / rewritten_question（补全继承槽位后的问句）/ inherited_slots
 # M4 已加：role / masked_columns（服务端结果行上被掩码的列）
+# M5 已加：failure_stage（最后一次失败发生在 validate/execute/timeout，ok=True 时为空）；
+#          attempts 每条带 stage（validate / execute / timeout / ok），失败分类不再猜 error 前缀
 ```
 
 ```http
 POST /api/ask
   { "question": "...", "use_llm": true, "session_id": "可选，不带就新开一个",
     "role": "analyst|viewer，默认 analyst" }
-  → { sql, ok, error, columns, rows, masked_columns, elapsed_ms, intent, reply,
-      clarify_options, engine, attempts, context, keywords,
+  → { sql, ok, error, failure_stage, columns, rows, masked_columns, elapsed_ms, intent,
+      reply, clarify_options, engine, attempts, context, keywords,
       session_id, rewritten_question, inherited_slots, role }
   # engine: rule | llm | custom，用来确认这次真的走了模型
   # 把返回的 session_id 带回来就能接上文；不带就是单轮，行为与 M2 一致
   # 非 ask 时 context 为 null（不检索、不泄漏 schema）
   # 未知 role 返回 400
 GET /api/schema?role=analyst|viewer → 按角色裁剪后的表/列/指标
-GET /api/eval   → 评测摘要
+GET /api/eval   → 评测摘要：total / exec_rate / intent_rate / multi_turn_rate /
+                  failure_counts …（details 与 multi_turn_details 不下发）
 GET /api/audit  → { total, entries }：越权尝试（内存环形缓冲）
 GET /api/health → { ok, tables, metrics, roles }
 ```
@@ -116,7 +130,8 @@ GET /api/health → { ok, tables, metrics, roles }
 ## 5. 质量门槛（不过不许提交）
 
 1. `python -m unittest discover -s tests` 全绿；
-2. `python -m app.evals` 执行一致率 ≥ 85%（CI 目前按 90% 卡）；
+2. `python -m app.evals` 单轮执行一致率 ≥ 85%（CI 卡 90%）；意图命中率与多轮一致率 ≥ 90%
+   （`--min-intent` / `--min-multi` 默认 0.9，CI 显式传参）；
 3. 新增模块必须有 ≥ 3 条带 AC 编号的测试；
 4. 不许引入第三方运行时依赖（保持 `dependencies = []`）；
 5. 每条 AC 至少要有一条"反向用例"（错误输入被正确拒绝）。
@@ -137,7 +152,7 @@ GET /api/health → { ok, tables, metrics, roles }
 | M1/M2 审核修复 | ✅ 已完成 | 2026-11-13 |
 | M3 多轮追问 | ✅ 已完成 | 35 条测试（AC-3.1~3.6，含标签覆盖/客户维度回环）；顺序 `session → 槽位继承 → classify → 生成`，classify 只收槽位；会话进程内、默认 5 轮 |
 | M4 权限与脱敏 | ✅ 已完成 | 29 条权限测试 + 7 条 HTTP 契约；顺序 `role → 裁剪 catalog → 槽位 → classify → 检索/生成`；列白名单（含禁 `*`）、裸投影掩码 + 值兜底、审计；2026-11-16 审核补了两条绕过路径 |
-| M5 评测扩容 + CI | ⬜ 待做 | 22 → 50 条 |
+| M5 评测与 CI | ✅ 已完成 | 57 条单轮（50 问数 + 7 意图/越权；6 指标 × 6 维度、31/36 组合、6 类时间）+ 7 会话 21 轮多轮评测；失败分类（routed/permission/validate/field/syntax/timeout/retrieval/result/intent）汇总；CI 三门槛 90% + artifact；扩容时修了退款率二次舍入 |
 
 ## 8. 开发约定
 

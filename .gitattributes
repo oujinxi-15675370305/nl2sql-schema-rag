@@ -1,0 +1,3 @@
+# 容器里的入口脚本必须是 LF：Windows 上 checkout 成 CRLF 会让 /bin/sh 报 "no such file"
+*.sh text eol=lf
+Dockerfile text eol=lf

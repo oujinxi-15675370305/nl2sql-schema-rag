@@ -9,7 +9,7 @@
 所以这个项目的重点不是"接个大模型"，而是**把 schema 缩到模型不会犯错的范围内**：
 
 1. 先从问题里抽出业务词（指标、维度、筛选值、时间）；
-2. 用三路检索把候选缩到 3 个指标、12 个列（demo 只有 4 张表，所以表的收敛收益有限）；
+2. 用三路检索把候选缩到 3 个指标、12 个列（demo 只有 5 张表、检索最多带 4 张，缩表收益有限）；
 3. 只把这部分 DDL 放进 prompt；
 4. 生成后用代码校验：只读、单语句、表白名单、限行；字段写错由执行报错兜住，并把报错回传给模型重写。
 
@@ -43,14 +43,17 @@ python main.py                     # http://127.0.0.1:8000
 想跑评测：
 
 ```bash
-python -m app.evals            # 打印每条用例
-python -m app.evals --json     # 输出 JSON，CI 用
+python -m app.evals                 # 单轮 + 多轮，打印每条用例
+python -m app.evals --multi-turn    # 只跑多轮评测
+python -m app.evals --json          # 输出 JSON，CI 用
 python -m unittest discover -s tests -v
 ```
 
 ## 现在的结果
 
-22 条用例，**执行结果一致率 100%**，平均 2ms（规则模式，不含模型调用）；另有 127 个单测覆盖检索、生成、校验、修复、路由、多轮、权限和 HTTP 契约。
+57 条单轮用例（50 条问数 + 7 条意图/越权），**问数执行结果一致率 100%**（50/50）、意图命中 100%（57/57）；另有 7 个会话 × 3 轮的多轮评测，逐轮执行一致率 100%（21/21）；平均 2ms（规则模式，不含模型调用）。153 个单测覆盖检索、生成、校验、修复、路由、多轮、权限、评测和 HTTP 契约。
+
+评测集覆盖 6 个指标 × 6 个维度（31/36 组合，customer 维度只留 1 条连通性用例）、6 类时间过滤，以及 chat / 澄清 / 超纲 / 写操作 / 越权 5 类非问数意图，失败分类见下面「评测与 CI」。
 
 注意这是**规则模式的成绩**，不能当"模型准确率"看：规则只覆盖了 6 个维度、6 个指标的组合，样本也少。接大模型后的真实表现要重测，见下面「已知问题」。
 
@@ -58,7 +61,7 @@ python -m unittest discover -s tests -v
 
 生成 → 校验 → 执行，任何一步失败都会把报错拼回 prompt 重写，最多 `max_repair` 次（默认 2）；**每次重试都要重新过校验器**，不会靠"重试"绕过只读检查。
 
-- 返回契约：`ok=true` 时 `error` 为空；`ok=false` 时 `error` 是最后一次的报错，`attempts` 记录全部尝试（每次含 `n / sql / ok / error`）。
+- 返回契约：`ok=true` 时 `error` 为空、`failure_stage` 为空；`ok=false` 时 `error` 是最后一次的报错，`attempts` 记录全部尝试（每次含 `n / sql / ok / error / stage`，`stage` 为 `validate / execute / timeout / ok`）。
 - 真实路径：配 `LLM_API_KEY`，模型看到 `no such column: order_cnt` 后改写；
 - 可复现演示：`python -m scripts.demo_repair`（脚本化生成器，离线，一条命令看到两次尝试）；
 - 超时保护：单条 SQL 超过 5 秒由 sqlite 的 progress handler 中断，记 `执行失败：查询超时（>5 秒），已中断`，并且**不会重试同一句**；
@@ -122,6 +125,31 @@ curl -s 'localhost:8000/api/schema?role=viewer'
 
 角色策略在 `app/permissions.py`：配"隐藏列 + 掩码列"，敏感列默认隐藏（新加敏感列不配置就不可见，等于最小权限白名单），不是把全部可见列枚举一遍。
 
+## 评测与 CI（M5）
+
+评测分两组，**指标不混算**（混在一起历史数字就不可比了）。
+
+**单轮 57 条**（`eval/cases.json`，50 条问数 + 7 条意图/越权）：主指标是"两边都执行、比对结果集"，SQL 字面匹配只作参考。
+
+| 覆盖 | 现状 |
+|---|---|
+| 指标 | 6 个指标全部出现 |
+| 维度 | 6 个维度全部出现 |
+| 指标×维度 | 31/36（customer 维度按客户分组每行 count=1，只留 1 条连通性用例） |
+| 时间 | 6 类：上个月 / 本月 / 今年 / 去年 / 最近 30 天 / 指定月份（`month:YYYY-MM`） |
+| 意图 | chat ×2 / 超纲 ×2 / clarify ×1 / 写操作 unsafe ×1 / viewer 越权 ×1 |
+| 其它 | 地区/品类筛选、双筛选、同义说法（成交额 / 平均订单金额）、Top N |
+
+**多轮 21 轮**（`eval/multi_turn.json`，7 个会话 × 3 轮）：用同一个 `Session` 顺序跑，覆盖时间继承、维度覆盖、筛选切换、"总共"不分组、新话题不继承、澄清轮不污染上下文、**客户维度回环**和**"改成华南"改写**；`multi_turn_rate` 单独统计。
+
+**失败分类**：失败用例带 `failure` 字段，`summary.failure_counts` / `multi_turn_failure_counts` 分别汇总——`routed`（路由拦截）/ `permission`（权限）/ `validate`（校验）/ `field`（字段不存在）/ `syntax`（生成语法错）/ `timeout`（超时）/ `retrieval`（检索未命中）/ `result`（结果不一致）/ `intent`（意图不符）。分类先看 `ask()` 记录的 `attempts[].stage`；只有执行阶段再按错误码区分 `field` / `syntax`（`no such column` / `syntax error`）。
+
+阈值：SPEC 门槛 85%，CI 按 90% 卡；意图命中率、多轮一致率同为 90%。CI 跑单测 + 评测（`timeout-minutes: 10`），评测 JSON 作为 artifact 上传，失败时能直接看哪条挂了。
+
+```bash
+python -m app.evals --threshold 0.9 --min-intent 0.9 --min-multi 0.9 --json
+```
+
 ## 配置
 
 不配也能跑。要接大模型，复制 `.env.example` 改名 `.env`（`main.py` 会自己读，不用 `export`）：
@@ -139,7 +167,7 @@ curl -s 'localhost:8000/api/schema?role=viewer'
 
 ```
 app/
-  catalog.json      演示 schema（5 表 + 6 指标，customers.phone 标 sensitive）
+  catalog.json      演示 schema（5 表 + 6 指标，customers.customer_phone 标 sensitive）
   catalog.py        加载成领域对象
   domain.py         表/列/指标/命中/计划的定义
   slots.py          业务词槽位（指标/维度/筛选/时间）——全项目唯一的词表
@@ -148,14 +176,15 @@ app/
   session.py        多轮会话与槽位继承（保留最近 5 轮，进程内存）
   permissions.py    角色策略、catalog 裁剪、掩码、SQL 打码、审计（M4）
   agent.py          生成、校验、执行、自我修复、ask()
-  evals.py          评测
+  evals.py          评测（单轮执行一致 / 多轮 / 失败分类）
   env.py            .env 读取（标准库实现）
   server.py         HTTP 服务
   web/              问数页面（原生 JS，无构建）
-eval/cases.json     22 条 NL→SQL 对照
+eval/cases.json     57 条单轮（50 问数 + 7 意图/越权）
+eval/multi_turn.json 7 个会话 × 3 轮多轮对照
 scripts/seed_demo_db.py
 scripts/demo_repair.py  演示"写错列名 → 带报错改对"
-tests/              127 个单测（含 HTTP 契约）
+tests/              153 个单测（含 HTTP 契约）
 docs/decisions.md   几个取舍的记录
 ```
 
@@ -169,15 +198,15 @@ docs/decisions.md   几个取舍的记录
 - **会话不落盘**：进程内存，重启即清空；每会话 5 轮、最多 200 个会话，超了淘汰最旧的；`session_id` 仍完全信任客户端（没有 TTL，知道 id 就能接进别人会话）。
 - **权限是"隐藏/掩码列"配置**，不是逐列枚举的白名单：敏感列默认隐藏，普通列两个角色都可见；新增普通列不需要改配置，新增敏感列忘了配置也不会泄漏。
 - **审计在进程内**（环形缓冲 100 条），重启即清空，也没有鉴权入口——demo 只做到可观测。role 同样由客户端声明（`{"role": "analyst"}`），没有认证：这是权限**策略**演示，不是账号体系。
-- **demo 只有 5 张表**：检索"缩表"在这套数据上是恒等变换，真正收敛的是列（24 → 12）和指标（6 → 3）。
+- **demo 只有 5 张表**：检索最多带 4 张，缩表的收敛收益仍然有限，真正收敛的是列（24 → 12）和指标（6 → 3）。
 - **列检索的稠密部分是近似**（字符 n-gram 哈希），换成真 embedding 后指标会变，现在的成绩不可直接对比。
-- **评测集只有 22 条**，且是我自己写的，有过拟合的嫌疑；下一步要拿真实提问补到 50 条以上。
+- **评测集 57 条仍是规则模式、自己写的**：覆盖 6 指标 × 6 维度，但 customer 维度只有 1 条、多轮只有 7 个会话 21 轮，有过拟合的嫌疑；下一步要拿真实提问继续补。
 
 ## 下一步
 
 - [x] 多轮追问与指代消解（先槽位继承，再路由）
 - [x] 列级权限与脱敏（不同角色看不到的字段要过滤，且不进 prompt/结果）
-- [ ] 评测补到 50 条 + CI 门禁 + 失败分类（检索未命中 / 语法错 / 字段不存在 / 结果不一致）
+- [x] 评测补到 50 条 + CI 门禁 + 失败分类（检索未命中 / 语法错 / 字段不存在 / 结果不一致）+ 多轮评测
 - [ ] Docker Compose、截图与 GIF
 - [ ] 接 Qdrant + ES，把内存索引换掉
 

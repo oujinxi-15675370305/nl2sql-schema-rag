@@ -35,7 +35,7 @@ FAILURE_LABELS = {
     "timeout": "执行超时",
     "retrieval": "检索未命中指标",
     "result": "结果不一致",
-    "intent": "多轮意图不符",
+    "intent": "意图不符（该问数 / 该拦截判错）",
     "execute": "执行报错",
     "unknown": "未分类",
 }
@@ -134,35 +134,53 @@ def classify_failure(plan: SQLPlan, matched: bool) -> str:
 
 
 def run(verbose: bool = True) -> dict:
-    """单轮评测 + 多轮评测；返回的 summary 同时包含两组独立指标。"""
+    """单轮评测 + 多轮评测；返回的 summary 同时包含两组独立指标。
+
+    单轮用例分两类：`expected_intent` 缺省是 `ask`（问数），也可以是
+    chat / clarify / out_of_scope / unsafe（意图/越权）。执行一致率只在问数用例上算，
+    意图命中率在所有用例上算——混在一起的话两个指标都不可读。
+    """
     catalog = load_catalog()
     cases = _load(CASES, "cases")
     details: list[dict] = []
-    exec_hit = exact_hit = intent_hit = 0
+    ask_total = exec_hit = exact_hit = intent_hit = 0
     latencies: list[int] = []
     failure_counts: Counter[str] = Counter()
 
     for case in cases:
+        expected_intent = case.get("expected_intent", "ask")
+        role = case.get("role", "analyst")
         started = time.time()
-        plan = ask(case["question"], catalog=catalog, use_llm=False)
+        plan = ask(case["question"], catalog=catalog, use_llm=False, role=role)
         latencies.append(int((time.time() - started) * 1000))
 
-        expected_rows, expected_error = _expected_result(case["expected_sql"], catalog)
-        matched = _matched(plan, expected_rows, expected_error)
-        exact = _same_sql(plan.sql, case["expected_sql"])
-        failure = classify_failure(plan, matched)
+        expected_rows: list[tuple] = []
+        expected_error = ""
+        if expected_intent == "ask":
+            ask_total += 1
+            expected_rows, expected_error = _expected_result(case["expected_sql"], catalog)
+            matched = _matched(plan, expected_rows, expected_error)
+            failure = classify_failure(plan, matched)
+            exec_hit += int(matched)
+        else:
+            # 非问数用例：意图对上、且确实没生成 SQL 才算过（AC-2.2）
+            matched = plan.intent == expected_intent and not plan.sql
+            failure = "" if matched else "intent"
+
+        exact = expected_intent == "ask" and _same_sql(plan.sql, case.get("expected_sql", ""))
+        intent_hit += int(plan.intent == expected_intent)
+        exact_hit += int(exact)
         if failure:
             failure_counts[failure] += 1
-        exec_hit += int(matched)
-        exact_hit += int(exact)
-        intent_hit += int(plan.intent == "ask")
 
         details.append({
             "id": case["id"],
             "question": case["question"],
+            "role": role,
+            "expected_intent": expected_intent,
             "intent": plan.intent,
             "sql": plan.sql,
-            "expected_sql": case["expected_sql"],
+            "expected_sql": case.get("expected_sql", ""),
             "ok": plan.ok,
             "error": plan.error or expected_error,
             "failure": failure,
@@ -176,20 +194,24 @@ def run(verbose: bool = True) -> dict:
             flag = "[PASS]" if matched else ("[PART]" if exact else "[FAIL]")
             print(f"{flag} #{case['id']:>2} {case['question']}  ({plan.elapsed_ms}ms, {details[-1]['rows']} 行)")
             if not matched:
-                print(f"    生成：{plan.sql.splitlines()[0][:90] if plan.sql else '(空)'}")
-                print(f"    期望：{case['expected_sql'][:90]}")
-                stage = f"，stage={plan.failure_stage}" if plan.failure_stage else ""
-                print(f"    分类：{failure}（{FAILURE_LABELS[failure]}）{stage}")
+                if expected_intent != "ask":
+                    print(f"    意图：{plan.intent}（期望 {expected_intent}）")
+                else:
+                    print(f"    生成：{plan.sql.splitlines()[0][:90] if plan.sql else '(空)'}")
+                    print(f"    期望：{case['expected_sql'][:90]}")
+                    stage = f"，stage={plan.failure_stage}" if plan.failure_stage else ""
+                    print(f"    分类：{failure}（{FAILURE_LABELS[failure]}）{stage}")
                 if plan.error:
                     print(f"    错误：{plan.error}")
 
     total = len(details)
     summary = {
         "total": total,
+        "ask_total": ask_total,
         "exec_match": exec_hit,
-        "exec_rate": round(exec_hit / total, 4) if total else 0.0,
+        "exec_rate": round(exec_hit / ask_total, 4) if ask_total else 0.0,
         "exact_match": exact_hit,
-        "exact_rate": round(exact_hit / total, 4) if total else 0.0,
+        "exact_rate": round(exact_hit / ask_total, 4) if ask_total else 0.0,
         "intent_match": intent_hit,
         "intent_rate": round(intent_hit / total, 4) if total else 0.0,
         "avg_ms": int(sum(latencies) / total) if total else 0,
@@ -210,6 +232,7 @@ def run_multi_turn(catalog: Catalog | None = None, verbose: bool = True) -> dict
     sessions = _load(MULTI_CASES, "sessions")
     details: list[dict] = []
     hit = 0
+    failure_counts: Counter[str] = Counter()
 
     for spec in sessions:
         session = Session(spec.get("id", ""))
@@ -231,6 +254,8 @@ def run_multi_turn(catalog: Catalog | None = None, verbose: bool = True) -> dict
                 matched = True
                 failure = ""
             hit += int(matched)
+            if failure:
+                failure_counts[failure] += 1
 
             details.append({
                 "session": session.id,
@@ -268,6 +293,7 @@ def run_multi_turn(catalog: Catalog | None = None, verbose: bool = True) -> dict
         "multi_turn_total": total,
         "multi_turn_match": hit,
         "multi_turn_rate": round(hit / total, 4) if total else 0.0,
+        "multi_turn_failure_counts": dict(sorted(failure_counts.items())),
         "multi_turn_details": details,
     }
 
@@ -303,13 +329,16 @@ def main(argv: list[str] | None = None) -> int:
             print(f"多轮 {summary['multi_turn_total']} 轮 | 一致率 {summary['multi_turn_rate']:.1%} "
                   f"({summary['multi_turn_match']}/{summary['multi_turn_total']})")
         else:
-            print(f"用例 {summary['total']} 条 | 执行一致率 {summary['exec_rate']:.1%} "
-                  f"({summary['exec_match']}/{summary['total']}) | 意图命中 {summary['intent_rate']:.1%} | "
+            print(f"用例 {summary['total']} 条（问数 {summary['ask_total']}）| 执行一致率 {summary['exec_rate']:.1%} "
+                  f"({summary['exec_match']}/{summary['ask_total']}) | 意图命中 {summary['intent_rate']:.1%} | "
                   f"SQL 完全匹配 {summary['exact_rate']:.1%} | 平均 {summary['avg_ms']}ms")
             print(f"多轮 {summary['multi_turn_total']} 轮 | 一致率 {summary['multi_turn_rate']:.1%} "
                   f"({summary['multi_turn_match']}/{summary['multi_turn_total']})")
             counts = summary["failure_counts"]
             print("失败分类：" + ("无" if not counts else " / ".join(f"{k} {v}" for k, v in counts.items())))
+        multi_counts = summary.get("multi_turn_failure_counts") or {}
+        if multi_counts:
+            print("多轮失败分类：" + " / ".join(f"{k} {v}" for k, v in multi_counts.items()))
         for label, value, limit in failed:
             print(f"未达标：{label} {value:.1%} < {limit:.1%}")
 

@@ -5,6 +5,7 @@ const metaEl = $("#meta");
 const tableWrap = $("#table-wrap");
 const sqlEl = $("#sql");
 const btnRun = $("#btn-run");
+const btnDemo = $("#btn-demo");
 const answerEl = $("#answer");
 const attemptsEl = $("#attempts");
 const rewriteEl = $("#rewrite");
@@ -118,6 +119,67 @@ function renderAttempts(attempts) {
     `<div class="attempts-title">自我修复：共尝试 ${attempts.length} 次</div>` + rows.join("");
 }
 
+function clearResult() {
+  metaEl.textContent = "";
+  sqlEl.textContent = "—";
+  rewriteEl.textContent = "";
+  tableWrap.innerHTML = "";
+  answerEl.innerHTML = "";
+  attemptsEl.innerHTML = "";
+  clearTags();
+}
+
+// ask 与 demo 端点返回同一份结构，渲染只写这一套
+function renderResult(data) {
+  // 服务端可能新开一个会话，后续请求带上它（演示接口不建会话，回空就不动）
+  if (data.session_id) sessionId = data.session_id;
+  // M3：告诉用户这句被补了什么，不然"那上个月呢"的结果看着像凭空来的
+  if (data.inherited_slots && data.inherited_slots.length && data.rewritten_question) {
+    rewriteEl.textContent = `承接上文 → ${data.rewritten_question}`;
+  }
+
+  // M2：非 ask 不生成 SQL，页面显示意图话术而不是"失败"
+  if (data.intent && data.intent !== "ask") {
+    renderReply(data, INTENT_SAMPLES);
+    setState(`意图：${INTENT_LABEL[data.intent] || data.intent}`, "info");
+    return;
+  }
+
+  renderAttempts(data.attempts);
+
+  if (!data.ok) {
+    setState(`失败：${data.error || "未知错误"}`, "error");
+    sqlEl.textContent = data.sql || "—";
+    return;
+  }
+
+  const ctx = data.context || {};
+  renderTags($("#ctx-metrics"), ctx.metrics, "指标");
+  renderTags($("#ctx-tables"), ctx.tables, "表");
+  renderTags($("#ctx-columns"), ctx.columns, "列");
+  renderTable(data.columns, data.rows);
+  sqlEl.textContent = data.sql;
+  const tries = (data.attempts || []).length;
+  // M4：服务端掩码过的列在这里点出来，避免把 138****0047 当成真实数据
+  const masked = (data.masked_columns || []).length
+    ? ` · 已掩码：${data.masked_columns.join(", ")}`
+    : "";
+  metaEl.textContent =
+    `${data.rows.length} 行 · ${data.elapsed_ms} ms${masked}${tries > 1 ? ` · 第 ${tries} 次尝试成功` : ""}`;
+  setState("完成", "ok");
+}
+
+async function postJson(url, payload) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || String(res.status));
+  return data;
+}
+
 async function run(question) {
   const q = (question ?? $("#q").value).trim();
   if (!q) {
@@ -127,67 +189,15 @@ async function run(question) {
   $("#q").value = q;
   btnRun.disabled = true;
   setState("生成中…", "loading");
-  metaEl.textContent = "";
-  sqlEl.textContent = "—";
-  rewriteEl.textContent = "";
-  tableWrap.innerHTML = "";
-  answerEl.innerHTML = "";
-  attemptsEl.innerHTML = "";
-  clearTags();
+  clearResult();
 
   try {
-    const res = await fetch("/api/ask", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        question: q,
-        role,
-        ...(sessionId ? { session_id: sessionId } : {}),
-      }),
+    const data = await postJson("/api/ask", {
+      question: q,
+      role,
+      ...(sessionId ? { session_id: sessionId } : {}),
     });
-    const data = await res.json();
-
-    if (!res.ok) {
-      setState(`请求失败：${data.error || res.status}`, "error");
-      return;
-    }
-
-    // 服务端可能新开一个会话，后续请求带上它
-    if (data.session_id) sessionId = data.session_id;
-    // M3：告诉用户这句被补了什么，不然"那上个月呢"的结果看着像凭空来的
-    if (data.inherited_slots && data.inherited_slots.length && data.rewritten_question) {
-      rewriteEl.textContent = `承接上文 → ${data.rewritten_question}`;
-    }
-
-    // M2：非 ask 不生成 SQL，页面显示意图话术而不是"失败"
-    if (data.intent && data.intent !== "ask") {
-      renderReply(data, INTENT_SAMPLES);
-      setState(`意图：${INTENT_LABEL[data.intent] || data.intent}`, "info");
-      return;
-    }
-
-    renderAttempts(data.attempts);
-
-    if (!data.ok) {
-      setState(`失败：${data.error || "未知错误"}`, "error");
-      sqlEl.textContent = data.sql || "—";
-      return;
-    }
-
-    const ctx = data.context || {};
-    renderTags($("#ctx-metrics"), ctx.metrics, "指标");
-    renderTags($("#ctx-tables"), ctx.tables, "表");
-    renderTags($("#ctx-columns"), ctx.columns, "列");
-    renderTable(data.columns, data.rows);
-    sqlEl.textContent = data.sql;
-    const tries = (data.attempts || []).length;
-    // M4：服务端掩码过的列在这里点出来，避免把 138****0047 当成真实数据
-    const masked = (data.masked_columns || []).length
-      ? ` · 已掩码：${data.masked_columns.join(", ")}`
-      : "";
-    metaEl.textContent =
-      `${data.rows.length} 行 · ${data.elapsed_ms} ms${masked}${tries > 1 ? ` · 第 ${tries} 次尝试成功` : ""}`;
-    setState("完成", "ok");
+    renderResult(data);
   } catch (err) {
     setState(`请求失败：${err.message}`, "error");
   } finally {
@@ -195,15 +205,26 @@ async function run(question) {
   }
 }
 
+// M6 演示：没配 LLM key 时规则生成器不会写错列，页面上看不到修复过程；
+// 这里用服务端的脚本化生成器复现"写错列名 → 带报错改对"，不写会话、不参与评测。
+async function runDemoRepair() {
+  btnDemo.disabled = true;
+  setState("演示：第一次故意写错列名…", "loading");
+  clearResult();
+  try {
+    const data = await postJson("/api/demo/repair", { role });
+    $("#q").value = data.question || "";
+    renderResult(data);
+  } catch (err) {
+    setState(`请求失败：${err.message}`, "error");
+  } finally {
+    btnDemo.disabled = false;
+  }
+}
+
 function resetView(stateText) {
   sessionId = "";
-  rewriteEl.textContent = "";
-  answerEl.innerHTML = "";
-  attemptsEl.innerHTML = "";
-  sqlEl.textContent = "—";
-  tableWrap.innerHTML = "";
-  metaEl.textContent = "";
-  clearTags();
+  clearResult();
   if (stateText) setState(stateText, "info");
 }
 
@@ -213,6 +234,9 @@ function syncRole() {
 }
 
 btnRun.addEventListener("click", () => run());
+
+// M6：演示自我修复（服务端脚本化生成器，离线可复现）
+btnDemo.addEventListener("click", () => runDemoRepair());
 
 // M3：清空会话上下文，下一句当新问题（否则连点两个示例会互相继承槽位）
 $("#btn-new").addEventListener("click", () => resetView("已开启新会话"));
@@ -240,8 +264,11 @@ $("#btn-eval").addEventListener("click", async () => {
   try {
     const res = await fetch("/api/eval");
     const s = await res.json();
+    const asks = s.ask_total ?? s.total;
     setState(
-      `评测 ${s.total} 条：执行一致率 ${(s.exec_rate * 100).toFixed(1)}%（${s.exec_match}/${s.total}），平均 ${s.avg_ms} ms`,
+      `评测 ${s.total} 条（问数 ${asks}）：执行一致率 ${(s.exec_rate * 100).toFixed(1)}%（${s.exec_match}/${asks}）` +
+        ` · 意图 ${(s.intent_rate * 100).toFixed(1)}% · 多轮 ${(s.multi_turn_rate * 100).toFixed(1)}%` +
+        `（${s.multi_turn_match}/${s.multi_turn_total}）· 平均 ${s.avg_ms} ms`,
       "ok"
     );
   } catch (e) {

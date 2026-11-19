@@ -6,7 +6,7 @@ requires-python = ">=3.10"
 dependencies = []
 
 [project.optional-dependencies]
-dev = []
+dev = ["pillow>=10"]  # 只给 scripts/shots.py 合成 GIF 用；运行时不依赖
 
 [tool.ruff]
 line-length = 110

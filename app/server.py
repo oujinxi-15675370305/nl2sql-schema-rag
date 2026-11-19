@@ -7,9 +7,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from app.agent import ask
+from app import demo
+from app.agent import ScriptedGenerator, ask
 from app.catalog import load_catalog
-from app.domain import Catalog
+from app.domain import Catalog, SQLPlan
 from app.permissions import AUDIT_LOG, DEFAULT_ROLE, ROLES, visible_catalog
 from app.retrieval import SchemaRetriever
 from app.session import SessionStore
@@ -29,6 +30,39 @@ def _role_of(raw: object) -> str:
 
 def _json(payload: dict, status: int = 200) -> tuple[int, str, bytes]:
     return status, "application/json; charset=utf-8", json.dumps(payload, ensure_ascii=False).encode()
+
+
+def _plan_payload(plan: SQLPlan, question: str) -> dict:
+    """`/api/ask` 和 `/api/demo/repair` 共用一份响应结构，前端只写一套渲染。"""
+    ctx, keywords = plan.context, plan.keywords
+    return {
+        "question": question,
+        "role": plan.role,
+        "sql": plan.sql,
+        "ok": plan.ok,
+        "error": plan.error,
+        "failure_stage": plan.failure_stage,
+        "columns": plan.columns,
+        "rows": [list(r) for r in plan.rows],
+        "masked_columns": plan.masked_columns,
+        "elapsed_ms": plan.elapsed_ms,
+        "intent": plan.intent,
+        "reply": plan.reply,
+        "clarify_options": plan.clarify_options,
+        "engine": plan.engine,
+        "attempts": plan.attempts,
+        "keywords": keywords,
+        "session_id": plan.session_id,
+        "rewritten_question": plan.rewritten_question,
+        "inherited_slots": plan.inherited_slots,
+        # 非 ask 不返回 schema（AC-4.1，也省一次检索）
+        "context": None if ctx is None else {
+            "metrics": [{"key": h.key, "score": round(h.score, 4)} for h in ctx.metrics],
+            "tables": [{"key": h.key, "score": round(h.score, 4)} for h in ctx.tables],
+            "columns": [{"key": h.key, "table": h.payload.get("table"), "score": round(h.score, 4)}
+                        for h in ctx.columns],
+        },
+    }
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -89,7 +123,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
-        if path != "/api/ask":
+        if path not in ("/api/ask", "/api/demo/repair"):
             return self._send(404, "text/plain; charset=utf-8", "not found".encode())
         length = int(self.headers.get("Content-Length", "0") or 0)
         try:
@@ -97,15 +131,27 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             return self._send(*_json({"ok": False, "error": "请求体不是合法 JSON"}, 400))
 
-        question = str(payload.get("question", "")).strip()
-        if not question:
-            return self._send(*_json({"ok": False, "error": "question 不能为空"}, 400))
-
         # M4：角色按请求传，不进会话；未知角色直接 400，不静默降级
         role = _role_of(payload.get("role"))
         if not role:
             return self._send(*_json(
                 {"ok": False, "error": f"未知角色：{payload.get('role')!r}（可选 {' / '.join(ROLES)}）"}, 400))
+
+        # 演示：脚本化生成器复现"写错列名 → 带报错改对"，离线截图/录屏用（不写会话）
+        if path == "/api/demo/repair":
+            plan = ask(
+                demo.QUESTION,
+                catalog=CATALOG,
+                retriever=RETRIEVERS[role],
+                generator=ScriptedGenerator(list(demo.ATTEMPTS)),
+                use_llm=False,
+                role=role,
+            )
+            return self._send(*_json(_plan_payload(plan, demo.QUESTION)))
+
+        question = str(payload.get("question", "")).strip()
+        if not question:
+            return self._send(*_json({"ok": False, "error": "question 不能为空"}, 400))
 
         # M3：前端没带 session_id 就新开一个，带回来就接着上文
         session = SESSIONS.get(str(payload.get("session_id") or "").strip() or None)
@@ -117,36 +163,7 @@ class Handler(BaseHTTPRequestHandler):
             session=session,
             role=role,
         )
-        ctx, keywords = plan.context, plan.keywords
-        body = {
-            "question": question,
-            "role": plan.role,
-            "sql": plan.sql,
-            "ok": plan.ok,
-            "error": plan.error,
-            "failure_stage": plan.failure_stage,
-            "columns": plan.columns,
-            "rows": [list(r) for r in plan.rows],
-            "masked_columns": plan.masked_columns,
-            "elapsed_ms": plan.elapsed_ms,
-            "intent": plan.intent,
-            "reply": plan.reply,
-            "clarify_options": plan.clarify_options,
-            "engine": plan.engine,
-            "attempts": plan.attempts,
-            "keywords": keywords,
-            "session_id": plan.session_id,
-            "rewritten_question": plan.rewritten_question,
-            "inherited_slots": plan.inherited_slots,
-            # 非 ask 不返回 schema（AC-4.1，也省一次检索）
-            "context": None if ctx is None else {
-                "metrics": [{"key": h.key, "score": round(h.score, 4)} for h in ctx.metrics],
-                "tables": [{"key": h.key, "score": round(h.score, 4)} for h in ctx.tables],
-                "columns": [{"key": h.key, "table": h.payload.get("table"), "score": round(h.score, 4)}
-                            for h in ctx.columns],
-            },
-        }
-        self._send(*_json(body))
+        self._send(*_json(_plan_payload(plan, question)))
 
 
 def serve(host: str = "127.0.0.1", port: int = 8000) -> None:

@@ -33,9 +33,12 @@ class AskApiTest(unittest.TestCase):
         cls.thread.join(timeout=5)
 
     def _post(self, question: str, **extra: object) -> tuple[int, dict]:
+        return self._post_path("/api/ask", {"question": question, **extra})
+
+    def _post_path(self, path: str, payload: dict | None = None) -> tuple[int, dict]:
         req = urllib.request.Request(
-            f"http://127.0.0.1:{self.port}/api/ask",
-            data=json.dumps({"question": question, **extra}).encode(),
+            f"http://127.0.0.1:{self.port}{path}",
+            data=json.dumps(payload or {}).encode(),
             headers={"Content-Type": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -71,6 +74,27 @@ class AskApiTest(unittest.TestCase):
         # M5：attempts[].stage 与 failure_stage 进 HTTP 契约（失败分类靠它们）
         self.assertEqual(data["failure_stage"], "")
         self.assertEqual(data["attempts"][-1]["stage"], "ok")
+
+    def test_demo_repair_contract(self) -> None:
+        # M6：离线演示"写错列名 → 带报错改对"，前端时间线用同一份 attempts 结构
+        _, data = self._post_path("/api/demo/repair")
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["question"], "各地区的GMV")
+        self.assertEqual(data["session_id"], "")  # 演示不写会话
+        self.assertEqual(len(data["attempts"]), 2)
+        self.assertFalse(data["attempts"][0]["ok"])
+        self.assertEqual(data["attempts"][0]["stage"], "execute")
+        self.assertIn("no such column", data["attempts"][0]["error"])
+        self.assertEqual(data["attempts"][1]["stage"], "ok")
+        self.assertEqual(data["failure_stage"], "")
+        self.assertEqual(len(data["rows"]), 4)
+        self.assertTrue(data["sql"].startswith("SELECT"))
+
+    def test_demo_repair_rejects_unknown_role(self) -> None:
+        # 反向用例：演示接口同样不静默降级未知角色
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self._post_path("/api/demo/repair", {"role": "guest"})
+        self.assertEqual(ctx.exception.code, 400)
 
     def test_session_round_trip(self) -> None:
         # AC-3.1 / AC-3.3：带上 session_id 就能接着上文，多轮不断

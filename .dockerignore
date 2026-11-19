@@ -1,0 +1,13 @@
+.git
+.github
+.gitignore
+.gitattributes
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+node_modules/
+*.log
+docs/screenshots/
+data/*
+!data/.gitkeep
