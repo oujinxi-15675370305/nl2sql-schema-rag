@@ -53,6 +53,7 @@ class Metric:
 class Catalog:
     tables: tuple[Table, ...]
     metrics: tuple[Metric, ...]
+    relations: tuple[tuple[str, str], ...] = ()
 
     def table(self, name: str) -> Table | None:
         return next((t for t in self.tables if t.name == name), None)
@@ -86,23 +87,51 @@ class SchemaContext:
         return [h.key for h in self.metrics]
 
     def ddl(self, catalog: Catalog) -> str:
-        """只渲染命中的表与列，控制 prompt 长度。"""
+        """只渲染命中的表与列，控制 prompt 长度。
+
+        两类列即使没被检索命中也要带上：
+        - 主外键（order_id / customer_id / region_id / product_id）和 status/order_date，
+          否则模型看不到 JOIN 键，会自己编 `o.order_id = c.customer_id` 这种条件；
+        - 命中指标 `requires` 里点名的列（比如客单价的 pay_amount）。
+        """
+        key_columns = {"order_id", "customer_id", "region_id", "product_id", "status", "order_date"}
+        required: dict[str, set[str]] = {}
+        for hit in self.metrics:
+            metric = catalog.metric(hit.key)
+            if metric is None:
+                continue
+            for ref in metric.requires:
+                table_name, _, column = ref.partition(".")
+                if table_name and column:
+                    required.setdefault(table_name, set()).add(column)
+
         lines: list[str] = []
         wanted_columns: dict[str, set[str]] = {}
         for h in self.columns:
             table = h.payload.get("table")
             if table:
                 wanted_columns.setdefault(table, set()).add(h.key)
+        rendered = set(self.table_names())
         for name in self.table_names():
             table = catalog.table(name)
             if not table:
                 continue
             keep = wanted_columns.get(name)
-            cols = [c for c in table.columns if not keep or c.name in keep]
+            force = required.get(name, set()) | key_columns
+            cols = [c for c in table.columns if not keep or c.name in keep or c.name in force]
             lines.append(f"-- {table.name}: {table.comment}")
             for c in cols:
                 flag = " [维度]" if c.is_dimension else (" [度量]" if c.is_measure else "")
                 lines.append(f"  {c.name} {c.type}{flag}  -- {c.comment}")
+            lines.append("")
+        relations = [
+            (left, right)
+            for left, right in catalog.relations
+            if left.split(".", 1)[0] in rendered and right.split(".", 1)[0] in rendered
+        ]
+        if relations:
+            lines.append("-- 表关系（JOIN 条件，只能按这些连表）")
+            lines.extend(f"--   {left} = {right}" for left, right in relations)
             lines.append("")
         for h in self.metrics:
             metric = catalog.metric(h.key)

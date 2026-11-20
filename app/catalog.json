@@ -1,4 +1,10 @@
 {
+  "relations": [
+    ["orders.customer_id", "customers.customer_id"],
+    ["orders.region_id", "regions.region_id"],
+    ["order_items.order_id", "orders.order_id"],
+    ["order_items.product_id", "products.product_id"]
+  ],
   "tables": [
     {
       "name": "orders",

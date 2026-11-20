@@ -84,6 +84,16 @@
   "改成华南"改写），用同一个 `Session` 顺序跑、逐轮比执行结果；指标为 `multi_turn_rate`，
   **不并入**单轮 `exec_rate`（否则历史数字不可比）。
 
+### M6 交付物：Docker + 截图 + GIF（P1）
+
+- **AC-6.1**：`docker compose up --build` 一条命令起服务：容器内生成演示库、暴露 8000 端口、
+  `HEALTHCHECK` 通过；挂载空 `/app/data` 时 entrypoint 能补 seed。
+- **AC-6.2**：README 带 3 张页面截图（角色掩码 / 越权拦截 / 自我修复时间线）+ 1 个多轮 GIF
+  （时间继承 → "改成华南"）；素材由 `scripts/shots.py` 固定脚本生成，页面改动后可重跑，不手工对时间点。
+- **AC-6.3**：没配 LLM key 时页面上也能看到自我修复时间线：`/api/demo/repair` 用脚本化生成器
+  复现"第一次写错列名 → 带报错改对"（响应结构与 `/api/ask` 一致，`attempts` 里能看到 execute 阶段失败），
+  **只做演示**：不写会话、不参与评测、不影响生成器。
+
 ## 4. 契约（公开接口，改动需改本文件）
 
 ```python
@@ -120,8 +130,12 @@ POST /api/ask
   # 把返回的 session_id 带回来就能接上文；不带就是单轮，行为与 M2 一致
   # 非 ask 时 context 为 null（不检索、不泄漏 schema）
   # 未知 role 返回 400
+POST /api/demo/repair
+  { "role": "analyst|viewer，可选，默认 analyst" }
+  → 与 /api/ask 同结构；固定演示"第一次写错列名 → 带报错改对"（AC-6.3）
+  # 只给页面「演示修复」和截图脚本用：不写会话（session_id 为空）、不参与评测
 GET /api/schema?role=analyst|viewer → 按角色裁剪后的表/列/指标
-GET /api/eval   → 评测摘要：total / exec_rate / intent_rate / multi_turn_rate /
+GET /api/eval   → 评测摘要：total / ask_total / exec_rate / intent_rate / multi_turn_rate /
                   failure_counts …（details 与 multi_turn_details 不下发）
 GET /api/audit  → { total, entries }：越权尝试（内存环形缓冲）
 GET /api/health → { ok, tables, metrics, roles }
@@ -153,6 +167,7 @@ GET /api/health → { ok, tables, metrics, roles }
 | M3 多轮追问 | ✅ 已完成 | 35 条测试（AC-3.1~3.6，含标签覆盖/客户维度回环）；顺序 `session → 槽位继承 → classify → 生成`，classify 只收槽位；会话进程内、默认 5 轮 |
 | M4 权限与脱敏 | ✅ 已完成 | 29 条权限测试 + 7 条 HTTP 契约；顺序 `role → 裁剪 catalog → 槽位 → classify → 检索/生成`；列白名单（含禁 `*`）、裸投影掩码 + 值兜底、审计；2026-11-16 审核补了两条绕过路径 |
 | M5 评测与 CI | ✅ 已完成 | 57 条单轮（50 问数 + 7 意图/越权；6 指标 × 6 维度、31/36 组合、6 类时间）+ 7 会话 21 轮多轮评测；失败分类（routed/permission/validate/field/syntax/timeout/retrieval/result/intent）汇总；CI 三门槛 90% + artifact；扩容时修了退款率二次舍入 |
+| M6 Docker + 截图/GIF | ✅ 已完成 | `docker compose up --build` 起 8000（容器内 seed、healthcheck、空 volume 补 seed）；`scripts/shots.py` 固定脚本产出 3 图 + 1 GIF；离线演示修复走 `/api/demo/repair`（脚本化生成器，不写会话、不参与评测）；155 个单测 |
 
 ## 8. 开发约定
 

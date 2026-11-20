@@ -32,13 +32,29 @@
 
 ## 跑起来
 
+本地（零依赖，标准库即可，3.10+）：
+
 ```bash
 git clone <repo> && cd nl2sql-schema-rag
 python scripts/seed_demo_db.py     # 生成演示库 data/demo.sqlite（800 单 / 1608 明细）
 python main.py                     # http://127.0.0.1:8000
 ```
 
-没有依赖要装，标准库就能跑（3.10+）。`main.py` 启动时会自动读同目录的 `.env`（没有也能跑）。
+`main.py` 启动时会自动读同目录的 `.env`（没有也能跑）。
+
+Docker（一条命令）：
+
+```bash
+docker compose up --build          # http://127.0.0.1:8000
+docker compose down
+```
+
+镜像基于 `python:3.11-slim`，构建时 seed 演示库；把空目录挂到 `/app/data` 时 entrypoint 会补一次 seed，
+自带 `HEALTHCHECK`（打 `/api/health`）。应用本身仍然是零依赖。
+
+Compose 只把 8000 绑到 `127.0.0.1`，避免把无鉴权的 demo / 审计接口暴露到局域网（要局域网演示自己改端口映射）。
+要接大模型，照常复制 `.env.example` 为 `.env` 并填 `LLM_API_KEY`：Compose 用宿主 `.env` 做插值、在容器启动时注入，
+`.env` 本身已被 `.dockerignore` 排除，不会打进镜像层；也可以 `docker compose run -e LLM_API_KEY=... app`。
 
 想跑评测：
 
@@ -51,11 +67,32 @@ python -m unittest discover -s tests -v
 
 ## 现在的结果
 
-57 条单轮用例（50 条问数 + 7 条意图/越权），**问数执行结果一致率 100%**（50/50）、意图命中 100%（57/57）；另有 7 个会话 × 3 轮的多轮评测，逐轮执行一致率 100%（21/21）；平均 2ms（规则模式，不含模型调用）。153 个单测覆盖检索、生成、校验、修复、路由、多轮、权限、评测和 HTTP 契约。
+57 条单轮用例（50 条问数 + 7 条意图/越权），**问数执行结果一致率 100%**（50/50）、意图命中 100%（57/57）；另有 7 个会话 × 3 轮的多轮评测，逐轮执行一致率 100%（21/21）；平均 2ms（规则模式，不含模型调用）。155 个单测覆盖检索、生成、校验、修复、路由、多轮、权限、评测和 HTTP 契约。
 
 评测集覆盖 6 个指标 × 6 个维度（31/36 组合，customer 维度只留 1 条连通性用例）、6 类时间过滤，以及 chat / 澄清 / 超纲 / 写操作 / 越权 5 类非问数意图，失败分类见下面「评测与 CI」。
 
 注意这是**规则模式的成绩**，不能当"模型准确率"看：规则只覆盖了 6 个维度、6 个指标的组合，样本也少。接大模型后的真实表现要重测，见下面「已知问题」。
+
+## 页面长什么样
+
+**analyst：手机号在结果行上掩码**（点图看原尺寸）
+
+[![analyst 掩码](docs/screenshots/01-role-mask-analyst.png)](docs/screenshots/01-role-mask-analyst.png)
+
+**viewer：同一句直接判越权，不生成 SQL**
+
+[![viewer 越权](docs/screenshots/02-role-mask-viewer.png)](docs/screenshots/02-role-mask-viewer.png)
+
+**演示修复：固定 SQL 复现"写错列名 → 带报错改对"（演示，不代表模型能力）**
+
+[![演示修复](docs/screenshots/03-demo-repair.png)](docs/screenshots/03-demo-repair.png)
+
+多轮承接 + "改成华南"（GIF，约 9 秒）：
+
+![多轮承接与改成华南](docs/screenshots/multi-turn.gif)
+
+素材由 `python scripts/shots.py` 用无头 Chrome 固定生成（3 张 PNG + 1 个 GIF）；页面改了重跑一次即可，
+不用手工对时间点。脚本是开发工具，只额外需要 Pillow 合成 GIF。
 
 ## 自我修复（M1）
 
@@ -65,7 +102,7 @@ python -m unittest discover -s tests -v
 - 真实路径：配 `LLM_API_KEY`，模型看到 `no such column: order_cnt` 后改写；
 - 可复现演示：`python -m scripts.demo_repair`（脚本化生成器，离线，一条命令看到两次尝试）；
 - 超时保护：单条 SQL 超过 5 秒由 sqlite 的 progress handler 中断，记 `执行失败：查询超时（>5 秒），已中断`，并且**不会重试同一句**；
-- 页面上会显示"自我修复：共尝试 N 次"和每次的报错。
+- 页面上会显示"自我修复：共尝试 N 次"和每次的报错；没配 key 时点右上角「演示修复」，走 `/api/demo/repair` 的脚本化生成器，离线也能看到完整的两次尝试。
 
 规则生成器不看 `feedback`，所以**离线模式不会真的改 SQL**——这一点在「已知问题」里写清楚了。
 
@@ -176,15 +213,20 @@ app/
   session.py        多轮会话与槽位继承（保留最近 5 轮，进程内存）
   permissions.py    角色策略、catalog 裁剪、掩码、SQL 打码、审计（M4）
   agent.py          生成、校验、执行、自我修复、ask()
+  demo.py           离线演示修复用的固定 SQL（M6）
   evals.py          评测（单轮执行一致 / 多轮 / 失败分类）
   env.py            .env 读取（标准库实现）
   server.py         HTTP 服务
   web/              问数页面（原生 JS，无构建）
+Dockerfile          容器镜像（python:3.11-slim，构建时 seed）
+docker-compose.yml  一条命令启动
 eval/cases.json     57 条单轮（50 问数 + 7 意图/越权）
 eval/multi_turn.json 7 个会话 × 3 轮多轮对照
 scripts/seed_demo_db.py
 scripts/demo_repair.py  演示"写错列名 → 带报错改对"
-tests/              153 个单测（含 HTTP 契约）
+scripts/shots.py    固定截图脚本（无头 Chrome + GIF）
+docs/screenshots/   3 张截图 + 多轮 GIF
+tests/              155 个单测（含 HTTP 契约）
 docs/decisions.md   几个取舍的记录
 ```
 
@@ -192,7 +234,9 @@ docs/decisions.md   几个取舍的记录
 
 - **只支持单指标 + 单维度**。「各品牌客单价和销量对比」这种会退化成默认维度，代码里留了 FIXME。
 - **规则生成覆盖窄**：时间只认上个月/本月/今年/去年/最近 30 天/具体月份，其它说法会忽略。
-- **自我修复在离线模式下是空转**：规则生成器不看 `feedback`，同一句 SQL 会重复生成；演示靠 `scripts/demo_repair.py` 的脚本化生成器，真实修复要配 `LLM_API_KEY`。
+- **自我修复在离线模式下是空转**：规则生成器不看 `feedback`，同一句 SQL 会重复生成；页面的「演示修复」和 `scripts/demo_repair.py` 用脚本化生成器复现"写错列名 → 改对"，真实修复要配 `LLM_API_KEY`。
+- **演示修复端点只用于展示**：`/api/demo/repair` 固定两条 SQL、不写会话、不参与评测；它证明的是时间线和重试链路，不代表模型能力。
+- **Compose 是单机 demo**：没有 TLS、认证、持久卷策略；真要部署，先补这几样再谈生产。
 - **路由是规则 + 词表**：换个说法仍可能误判；已知反例都写进了 `tests/test_router.py`，也还没接 LLM 兜底。
 - **多轮靠规则继承**：只认槽位、指代词（那/呢/换成…）和"纯槽位"的补充（"上个月""按品类看下"）；句子里有新主语就要求澄清（"上个月工资发了多少"），也没有跨会话记忆。
 - **会话不落盘**：进程内存，重启即清空；每会话 5 轮、最多 200 个会话，超了淘汰最旧的；`session_id` 仍完全信任客户端（没有 TTL，知道 id 就能接进别人会话）。
@@ -207,7 +251,7 @@ docs/decisions.md   几个取舍的记录
 - [x] 多轮追问与指代消解（先槽位继承，再路由）
 - [x] 列级权限与脱敏（不同角色看不到的字段要过滤，且不进 prompt/结果）
 - [x] 评测补到 50 条 + CI 门禁 + 失败分类（检索未命中 / 语法错 / 字段不存在 / 结果不一致）+ 多轮评测
-- [ ] Docker Compose、截图与 GIF
+- [x] Docker Compose、截图与 GIF
 - [ ] 接 Qdrant + ES，把内存索引换掉
 
 ## License

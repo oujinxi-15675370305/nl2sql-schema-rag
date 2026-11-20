@@ -44,4 +44,8 @@ def load_catalog(path: str | Path | None = None) -> Catalog:
         )
         for m in raw.get("metrics", [])
     )
-    return Catalog(tables=tuple(tables), metrics=metrics)
+    return Catalog(
+        tables=tuple(tables),
+        metrics=metrics,
+        relations=tuple(tuple(r) for r in raw.get("relations", ())),
+    )

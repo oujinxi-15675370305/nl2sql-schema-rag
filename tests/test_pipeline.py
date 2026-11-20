@@ -1,9 +1,20 @@
 """端到端测试：检索、生成、校验、执行、评测。不依赖任何外部服务。"""
 from __future__ import annotations
 
+import json
+import os
 import unittest
+from unittest import mock
 
-from app.agent import METRIC_SQL, QueryTimeout, build_context, execute, rule_based_sql, validate
+from app.agent import (
+    METRIC_SQL,
+    QueryTimeout,
+    build_context,
+    execute,
+    llm_sql,
+    rule_based_sql,
+    validate,
+)
 from app.catalog import load_catalog
 from app.evals import normalize, run as run_eval
 from app.retrieval import SchemaRetriever, rrf, tokenize
@@ -90,6 +101,57 @@ class GenerationTest(unittest.TestCase):
         # M4：只有明确点名才选敏感列；普通"各客户的GMV"不能顺手把手机号带出来
         self.assertNotIn("customer_phone", self._sql("各客户的GMV"))
         self.assertIn("customer_phone", self._sql("各客户的GMV和手机号"))
+
+
+class PromptContextTest(unittest.TestCase):
+    """给 LLM 的上下文：JOIN 键、表关系、指标依赖的列、口径规则都不能少。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.catalog = load_catalog()
+        cls.retriever = SchemaRetriever(cls.catalog)
+
+    def test_ddl_includes_join_keys_and_relations(self) -> None:
+        ctx, _ = build_context("各地区的销量", self.catalog, self.retriever)
+        ddl = ctx.ddl(self.catalog)
+        self.assertIn("-- 表关系", ddl)
+        self.assertIn("orders.region_id = regions.region_id", ddl)
+        self.assertIn("order_items.order_id = orders.order_id", ddl)
+        # 即使 region_id / order_id 没被列检索命中，也要出现在 DDL 里，否则模型会瞎编 JOIN
+        self.assertIn("region_id", ddl)
+        self.assertIn("order_id", ddl)
+
+    def test_ddl_includes_metric_required_columns(self) -> None:
+        ctx, _ = build_context("各品牌的客单价", self.catalog, self.retriever)
+        ddl = ctx.ddl(self.catalog)
+        self.assertIn("pay_amount", ddl)  # aov 的 requires 列
+        self.assertIn("brand", ddl)
+
+    def test_llm_prompt_carries_rules_relations_and_strips_fences(self) -> None:
+        ctx, _ = build_context("各地区的销量", self.catalog, self.retriever)
+        payload = {"choices": [{"message": {"content": "```sql\nSELECT 1\n```"}}]}
+
+        class FakeResponse:
+            def read(self) -> bytes:
+                return json.dumps(payload).encode()
+
+            def __enter__(self) -> "FakeResponse":
+                return self
+
+            def __exit__(self, *args: object) -> bool:
+                return False
+
+        with mock.patch.dict(os.environ, {"LLM_API_KEY": "test-key"}), \
+                mock.patch("urllib.request.urlopen", return_value=FakeResponse()) as fake:
+            sql = llm_sql("各地区的销量", ctx, self.catalog)
+            body = json.loads(fake.call_args[0][0].data.decode())
+
+        prompt = body["messages"][0]["content"]
+        self.assertEqual(sql, "SELECT 1")
+        self.assertIn("表关系", prompt)
+        self.assertIn("o.status = 'paid'", prompt)
+        self.assertIn("LIMIT 10", prompt)
+        self.assertIn("各地区的销量", prompt)
 
 
 class ValidatorTest(unittest.TestCase):

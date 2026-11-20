@@ -114,6 +114,28 @@ M4 的 P0 是"单轮 22 条全绿、多轮算错"，而单轮评测完全看不�
 
 退款率的口径注释原来写"退款订单数 / 已支付订单数"，SQL 分母其实是全部订单（按订单当前状态统计）；这次统一成注释口径，SQL 只保留 `ROUND(..., 4)` 的外层修正。
 
+## 2026-11-19 Docker：镜像里 seed，entrypoint 兜底
+
+镜像用 `python:3.11-slim`，构建时跑一次 seed，容器起来就是可用的演示库；如果用户把空目录挂到 `/app/data`（空 bind mount 不会触发 Docker 的 volume copy-up），entrypoint 检测到 `data/demo.sqlite` 不存在就补一次。`HEALTHCHECK` 打 `/api/health`，compose 起来后是 `Up (healthy)`。
+
+没上 gunicorn/nginx：`ThreadingHTTPServer` 对这个 demo 足够，引 WSGI 服务器只会多一层配置。compose 也没有 TLS、认证、持久卷——README 的「已知问题」里写明这是单机 demo。
+
+两个安全细节：端口只绑 `127.0.0.1:8000`，不把无鉴权的 demo / 审计接口暴露到局域网；`.env` 被 `.dockerignore` 排除（README 让用户复制它配 LLM，`COPY . .` 会把密钥烤进镜像层），LLM 变量由 Compose 用宿主 `.env` 插值、运行时注入。
+
+顺带踩到两个 Windows 相关的坑：`/bin/sh` 入口脚本必须带 shebang 且是 LF（`.gitattributes` 钉 `*.sh eol=lf`）；PowerShell 的 `Invoke-WebRequest` 发中文 JSON 不按 UTF-8 编码，验证容器接口要用 Python 或浏览器，别拿它当接口测试。
+
+## 2026-11-19 截图用固定脚本，不引 Playwright
+
+页面素材要能重跑：`scripts/shots.py` 自己起服务、起无头 Chrome，用 Chrome DevTools Protocol（标准库实现的 WebSocket 客户端）点按钮、等状态、截图；GIF 用 Pillow 把按时间点抓的帧合成（只是开发工具，`dependencies` 仍是空）。
+
+没引 Playwright/Selenium：为一个 3 图 + 1 GIF 的开发脚本加浏览器运行时和几 MB 依赖，和"clone 下来就能跑"的取向相反；CDP 的 WebSocket 协议本身不复杂，脚本里一百行左右就够。代价是机器上得装 Chrome/Edge（README 写清楚）。
+
+## 2026-11-19 离线演示修复：单独端点，不碰生成器
+
+规则生成器不会写错列名，所以离线页面永远只有一次尝试——截图里看不到"修复时间线"。没去改生成器造假，也没把演示 SQL 塞进主流程，而是加了 `/api/demo/repair`：用 `ScriptedGenerator` 固定两条 SQL（第一次 `GROUP BY` 错列 → `no such column`，第二次改对），响应结构与 `/api/ask` 完全一致，前端复用同一套渲染；不写会话、不参与评测。
+
+这样"演示"和"真实能力"的边界是清楚的：README 的已知问题里写明它只证明时间线与重试链路，真实修复仍然要配 LLM。
+
 ## 还没想清楚
 
 - 指标口径冲突怎么办：同一个"客单价"，不同部门算法不一样。现在是单一 metric 定义，真做要加"口径版本"。

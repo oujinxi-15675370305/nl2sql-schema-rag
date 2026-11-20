@@ -15,7 +15,7 @@ from typing import Iterable
 
 from app import permissions
 from app.catalog import load_catalog
-from app.domain import Catalog, SchemaContext, SQLPlan
+from app.domain import Catalog, Hit, SchemaContext, SQLPlan
 from app.retrieval import SchemaRetriever
 from app.router import classify, reply_for
 from app.session import Session, inherit_slots, rewrite_question
@@ -26,6 +26,35 @@ DB_PATH = ROOT / "data" / "demo.sqlite"
 QUERY_TIMEOUT_S = 5.0  # 单条 SQL 的执行预算，超了就让 sqlite 中断
 
 # ---------- 上下文 ----------
+def _required_tables(catalog: Catalog, slots: dict) -> list[str]:
+    """指标 / 维度 / 筛选一定用到的表。
+
+    "家电品类的成交额" 这类问题，列检索容易把 orders 挤掉（top_tables=4，库里有 5 张表），
+    但 gmv 的口径 SQL 依赖 orders.pay_amount——表不在 context 里，模型只能改用 item_amount。
+    这里把必需表补进来，再用它们替换掉得分最低的无关表，保持 4 张表的上限。
+    """
+    required: list[str] = []
+    for key in slots.get("metric", []):
+        metric = catalog.metric(key)
+        if metric:
+            for ref in metric.requires:
+                table = ref.split(".", 1)[0]
+                if table not in required:
+                    required.append(table)
+    # 所有指标都要么过滤 orders.status、要么按订单去重/关联，orders 基本是必需表
+    if slots.get("metric"):
+        required.append("orders")
+    dims = set(slots.get("dimension", []))
+    filters = " ".join(slots.get("filter", []))
+    if dims & {"category", "brand", "product"} or "category:" in filters:
+        required.extend(["products", "order_items"])
+    if "region" in dims or "region:" in filters:
+        required.append("regions")
+    if "customer" in dims:
+        required.append("customers")
+    return list(dict.fromkeys(t for t in required if catalog.table(t)))
+
+
 def build_context(
     question: str,
     catalog: Catalog,
@@ -35,6 +64,21 @@ def build_context(
     """`keywords` 传了就用它（M3 里是继承后的槽位），避免再抽一遍。"""
     slots = keywords if keywords is not None else extract_keywords(question, catalog)
     metrics, tables, columns = retriever.retrieve(question)
+    required = _required_tables(catalog, slots)
+    held = {h.key for h in tables}
+    for name in required:
+        if name in held:
+            continue
+        # 补表时优先挤掉得分最低、且不在必需列表里的表，保持最多 4 张
+        if len(tables) >= 4:
+            droppable = [(i, h.score) for i, h in enumerate(tables) if h.key not in required]
+            if droppable:
+                drop_index = min(droppable, key=lambda item: item[1])[0]
+                tables.pop(drop_index)
+        table = catalog.table(name)
+        tables.append(Hit(kind="table", key=name, score=0.0,
+                          payload={"comment": table.comment if table else ""}))
+        held.add(name)
     ctx = SchemaContext(metrics=metrics, tables=tables, columns=columns)
     # 关键词命中的指标置顶
     if slots["metric"]:
@@ -194,13 +238,34 @@ def llm_sql(
     base = os.getenv("LLM_BASE_URL", "https://api.deepseek.com/v1").rstrip("/")
     model = os.getenv("LLM_MODEL", "deepseek-chat")
     prompt = (
-        "你是数据仓库的 SQL 生成器。只能使用下面给出的表和列，禁止编造字段。\n"
+        "你是数据仓库的 SQL 生成器。只能使用下面给出的表和列，禁止编造字段或 JOIN 条件。\n"
         f"可用 schema：\n{ctx.ddl(catalog)}\n\n"
+        "口径与格式（必须遵守）：\n"
+        "- 只输出一条 SELECT 语句，不要解释，不要 markdown。\n"
+        "- 指标口径以 schema 里给出的 metric SQL 为准。\n"
+        "- GMV/成交额/销售额一律用 SUM(o.pay_amount)，不要用 order_items.item_amount 或 quantity*unit_price。\n"
+        "- 成交额/订单数/客单价/销量/客户数只统计 o.status = 'paid'；退款率不要加这个过滤。\n"
+        "- 日期列是 TEXT 'YYYY-MM-DD'；按月分组用 substr(o.order_date, 1, 7)，不要用 strftime。\n"
+        "- 本月/上个月/今年/去年/最近30天用 date('now', ...) 计算，不要把 'now' 当字符串 substr：\n"
+        "  本月 o.order_date >= date('now','start of month')；\n"
+        "  上个月 >= date('now','start of month','-1 month') 且 < date('now','start of month')；\n"
+        "  今年 >= date('now','start of year')；去年 >= date('now','start of year','-1 year') 且 < date('now','start of year')；\n"
+        "  最近30天 >= date('now','-30 day')；\n"
+        "  只有指定月份（YYYY-MM）才用 substr(o.order_date,1,7) = 'YYYY-MM'。\n"
+        "- 只 SELECT 问题要求的维度列和指标列，不要额外列。\n"
+        "- 如果问题只是换筛选条件（例如「换成华南」），不要额外 SELECT 被筛选的列，除非问题要求按它分组。\n"
+        "- 问题里有 排名/Top/最多/前N 时：ORDER BY 指标 DESC LIMIT 10；否则不要 ORDER BY、不要 LIMIT。\n"
+        "- JOIN 只能使用 schema 里列出的表关系。\n\n"
+        "示例：\n"
+        "问题：各地区的GMV\n"
+        "SQL：SELECT r.region_name, ROUND(SUM(o.pay_amount), 2) AS gmv "
+        "FROM orders o JOIN regions r ON r.region_id = o.region_id "
+        "WHERE o.status = 'paid' GROUP BY r.region_name\n\n"
         f"问题：{question}\n"
     )
     if feedback:
         prompt += f"\n上一次生成的 SQL 有问题，请修正后重新生成：\n{feedback}\n"
-    prompt += "只输出一条 SELECT 语句，不要解释，不要 markdown。"
+    prompt += "只输出 SQL。"
     body = json.dumps(
         {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0}
     ).encode()

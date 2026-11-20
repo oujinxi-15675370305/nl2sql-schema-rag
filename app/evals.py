@@ -19,6 +19,7 @@ from pathlib import Path
 from app.agent import ask, execute, validate
 from app.catalog import load_catalog
 from app.domain import Catalog, SQLPlan
+from app.env import load_env
 from app.session import Session
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -133,12 +134,12 @@ def classify_failure(plan: SQLPlan, matched: bool) -> str:
     return "result"
 
 
-def run(verbose: bool = True) -> dict:
+def run(verbose: bool = True, engine: str = "rule") -> dict:
     """单轮评测 + 多轮评测；返回的 summary 同时包含两组独立指标。
 
-    单轮用例分两类：`expected_intent` 缺省是 `ask`（问数），也可以是
-    chat / clarify / out_of_scope / unsafe（意图/越权）。执行一致率只在问数用例上算，
-    意图命中率在所有用例上算——混在一起的话两个指标都不可读。
+    `engine="rule"`（默认）走离线规则，CI 用；`engine="llm"` 走真实模型，
+    必须配 `LLM_API_KEY`，并额外统计 `engine_counts` / `fallbacks`——静默回退到规则时
+    分数不可信，`main()` 会直接判失败。
     """
     catalog = load_catalog()
     cases = _load(CASES, "cases")
@@ -146,18 +147,21 @@ def run(verbose: bool = True) -> dict:
     ask_total = exec_hit = exact_hit = intent_hit = 0
     latencies: list[int] = []
     failure_counts: Counter[str] = Counter()
+    engine_counts: Counter[str] = Counter()
+    use_llm = engine == "llm"
 
     for case in cases:
         expected_intent = case.get("expected_intent", "ask")
         role = case.get("role", "analyst")
         started = time.time()
-        plan = ask(case["question"], catalog=catalog, use_llm=False, role=role)
+        plan = ask(case["question"], catalog=catalog, use_llm=use_llm, role=role)
         latencies.append(int((time.time() - started) * 1000))
 
         expected_rows: list[tuple] = []
         expected_error = ""
         if expected_intent == "ask":
             ask_total += 1
+            engine_counts[plan.engine] += 1
             expected_rows, expected_error = _expected_result(case["expected_sql"], catalog)
             matched = _matched(plan, expected_rows, expected_error)
             failure = classify_failure(plan, matched)
@@ -179,6 +183,7 @@ def run(verbose: bool = True) -> dict:
             "role": role,
             "expected_intent": expected_intent,
             "intent": plan.intent,
+            "engine": plan.engine,
             "sql": plan.sql,
             "expected_sql": case.get("expected_sql", ""),
             "ok": plan.ok,
@@ -216,13 +221,16 @@ def run(verbose: bool = True) -> dict:
         "intent_rate": round(intent_hit / total, 4) if total else 0.0,
         "avg_ms": int(sum(latencies) / total) if total else 0,
         "failure_counts": dict(sorted(failure_counts.items())),
+        "engine": engine,
+        "engine_counts": dict(sorted(engine_counts.items())),
+        "fallbacks": sum(v for k, v in engine_counts.items() if k != "llm") if use_llm else 0,
         "details": details,
     }
-    summary.update(run_multi_turn(catalog=catalog, verbose=verbose))
+    summary.update(run_multi_turn(catalog=catalog, verbose=verbose, engine=engine))
     return summary
 
 
-def run_multi_turn(catalog: Catalog | None = None, verbose: bool = True) -> dict:
+def run_multi_turn(catalog: Catalog | None = None, verbose: bool = True, engine: str = "rule") -> dict:
     """多轮评测：一个 `Session` 顺序跑完一组问题，逐轮比执行结果。
 
     多轮指标单独统计（`multi_turn_rate`），不并进单轮 `exec_rate`。
@@ -233,15 +241,18 @@ def run_multi_turn(catalog: Catalog | None = None, verbose: bool = True) -> dict
     details: list[dict] = []
     hit = 0
     failure_counts: Counter[str] = Counter()
+    engine_counts: Counter[str] = Counter()
+    use_llm = engine == "llm"
 
     for spec in sessions:
         session = Session(spec.get("id", ""))
         for index, turn in enumerate(spec["turns"], start=1):
-            plan = ask(turn["question"], catalog=catalog, use_llm=False, session=session)
+            plan = ask(turn["question"], catalog=catalog, use_llm=use_llm, session=session)
             expected_intent = turn.get("expected_intent", "ask")
             expected_rows: list[tuple] = []
             expected_error = ""
             if expected_intent == "ask":
+                engine_counts[plan.engine] += 1
                 expected_rows, expected_error = _expected_result(turn.get("expected_sql", ""), catalog)
 
             if plan.intent != expected_intent:
@@ -263,6 +274,7 @@ def run_multi_turn(catalog: Catalog | None = None, verbose: bool = True) -> dict
                 "question": turn["question"],
                 "intent": plan.intent,
                 "expected_intent": expected_intent,
+                "engine": plan.engine,
                 "inherited_slots": plan.inherited_slots,
                 "rewritten_question": plan.rewritten_question,
                 "sql": plan.sql,
@@ -294,6 +306,8 @@ def run_multi_turn(catalog: Catalog | None = None, verbose: bool = True) -> dict
         "multi_turn_match": hit,
         "multi_turn_rate": round(hit / total, 4) if total else 0.0,
         "multi_turn_failure_counts": dict(sorted(failure_counts.items())),
+        "multi_turn_engine_counts": dict(sorted(engine_counts.items())),
+        "multi_turn_fallbacks": sum(v for k, v in engine_counts.items() if k != "llm") if use_llm else 0,
         "multi_turn_details": details,
     }
 
@@ -306,13 +320,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min-intent", type=float, default=0.9, help="单轮意图命中率门槛，默认 0.9")
     parser.add_argument("--min-multi", type=float, default=0.9, help="多轮执行一致率门槛，默认 0.9")
     parser.add_argument("--multi-turn", action="store_true", help="只跑多轮评测（调试用）")
+    parser.add_argument("--engine", choices=("rule", "llm"), default="rule",
+                        help="rule=离线规则（CI 默认）；llm=真实模型（需 LLM_API_KEY，静默回退会判失败）")
     args = parser.parse_args(argv)
+    load_env(ROOT / ".env")  # 本地跑 --engine llm 时读 key；CI 没有 .env 会自动跳过
 
     if args.multi_turn:
-        summary = run_multi_turn(verbose=not args.json)
+        summary = run_multi_turn(verbose=not args.json, engine=args.engine)
         checks = [("多轮一致率", summary["multi_turn_rate"], args.min_multi)]
     else:
-        summary = run(verbose=not args.json)
+        summary = run(verbose=not args.json, engine=args.engine)
         checks = [
             ("单轮执行一致率", summary["exec_rate"], args.threshold),
             ("单轮意图命中率", summary["intent_rate"], args.min_intent),
@@ -320,6 +337,9 @@ def main(argv: list[str] | None = None) -> int:
         ]
 
     failed = [(label, value, limit) for label, value, limit in checks if value < limit]
+    fallbacks = 0
+    if args.engine == "llm":
+        fallbacks = summary.get("fallbacks", 0) + summary.get("multi_turn_fallbacks", 0)
 
     if args.json:
         print(json.dumps(summary, ensure_ascii=False, indent=1))
@@ -336,13 +356,17 @@ def main(argv: list[str] | None = None) -> int:
                   f"({summary['multi_turn_match']}/{summary['multi_turn_total']})")
             counts = summary["failure_counts"]
             print("失败分类：" + ("无" if not counts else " / ".join(f"{k} {v}" for k, v in counts.items())))
+        if args.engine == "llm":
+            print(f"引擎：llm | 静默回退：{fallbacks}（回退时 engine=rule，结果不可信）")
         multi_counts = summary.get("multi_turn_failure_counts") or {}
         if multi_counts:
             print("多轮失败分类：" + " / ".join(f"{k} {v}" for k, v in multi_counts.items()))
         for label, value, limit in failed:
             print(f"未达标：{label} {value:.1%} < {limit:.1%}")
+        if fallbacks:
+            print(f"未达标：LLM 静默回退 {fallbacks} 次（这轮结果其实是规则跑的）")
 
-    return 1 if failed else 0
+    return 1 if (failed or fallbacks) else 0
 
 
 if __name__ == "__main__":

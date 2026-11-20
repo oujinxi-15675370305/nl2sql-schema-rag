@@ -209,6 +209,7 @@ async function run(question) {
 // 这里用服务端的脚本化生成器复现"写错列名 → 带报错改对"，不写会话、不参与评测。
 async function runDemoRepair() {
   btnDemo.disabled = true;
+  sessionId = "";  // 演示不写会话，也不该让下一句继承演示前的旧上下文
   setState("演示：第一次故意写错列名…", "loading");
   clearResult();
   try {

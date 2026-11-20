@@ -3,10 +3,15 @@ services:
     build: .
     image: nl2sql-schema-rag:0.1
     ports:
-      - "8000:8000"
+      # 只绑本机，避免把无鉴权的 demo / 审计接口暴露到局域网；要局域网演示自己改这里
+      - "127.0.0.1:8000:8000"
     environment:
       PORT: "8000"
       HOST: "0.0.0.0"
+      # LLM 配置由 Compose 从宿主机 .env 插值、运行时注入；.env 不进镜像（见 .dockerignore）
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com/v1}
+      LLM_MODEL: ${LLM_MODEL:-deepseek-chat}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2)"]

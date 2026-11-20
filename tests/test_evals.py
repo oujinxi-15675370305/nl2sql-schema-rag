@@ -215,6 +215,9 @@ class EvalSummaryTest(unittest.TestCase):
         self.assertEqual(summary["exec_rate"], 1.0)
         self.assertEqual(summary["intent_rate"], 1.0)
         self.assertEqual(summary["failure_counts"], {})
+        self.assertEqual(summary["engine"], "rule")
+        self.assertEqual(summary["engine_counts"], {"rule": summary["ask_total"]})
+        self.assertEqual(summary["fallbacks"], 0)
         self.assertEqual(len(summary["details"]), summary["total"])
         self.assertTrue(all(d["failure"] == "" for d in summary["details"]))
 
@@ -227,6 +230,21 @@ class EvalSummaryTest(unittest.TestCase):
         # 两组用例不混算：多轮轮数不能并进单轮 total
         self.assertEqual(summary["total"], len(summary["details"]))
         self.assertEqual(summary["multi_turn_total"], len(summary["multi_turn_details"]))
+
+
+class EngineModeTest(unittest.TestCase):
+    def test_llm_mode_detects_silent_fallbacks(self) -> None:
+        # 没 key / 请求失败时 LLMGenerator 会静默退回规则：engine 不再是 llm，
+        # 这种"LLM 跑出来 100%"是假的，run() 要能把回退次数暴露出来。
+        with mock.patch("app.agent.llm_sql", return_value=None):
+            summary = run(verbose=False, engine="llm")
+        self.assertEqual(summary["engine"], "llm")
+        self.assertEqual(summary["engine_counts"], {"rule": summary["ask_total"]})
+        self.assertEqual(summary["fallbacks"], summary["ask_total"])
+        # 澄清轮不生成 SQL，不计 engine；回退数应等于实际走生成器的多轮轮数
+        self.assertEqual(summary["multi_turn_engine_counts"], {"rule": 20})
+        self.assertEqual(summary["multi_turn_fallbacks"],
+                         sum(summary["multi_turn_engine_counts"].values()))
 
 
 if __name__ == "__main__":

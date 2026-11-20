@@ -7,7 +7,18 @@ __pycache__/
 .venv/
 venv/
 node_modules/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 *.log
+
+# 密钥不进镜像：README 让用户复制 .env 配 LLM，Dockerfile 是 COPY . .
+# 不排除的话，docker build 会把 LLM_API_KEY 烤进镜像层（history / push 都可能带出去）
+.env
+.env.*
+!.env.example
+
 docs/screenshots/
 data/*
 !data/.gitkeep
+eval/last.json
