@@ -7,6 +7,7 @@ import unittest
 from unittest import mock
 
 from app.agent import (
+    LLMGenerator,
     QueryTimeout,
     build_context,
     execute,
@@ -100,6 +101,21 @@ class GenerationTest(unittest.TestCase):
         # M4：只有明确点名才选敏感列；普通"各客户的GMV"不能顺手把手机号带出来
         self.assertNotIn("customer_phone", self._sql("各客户的GMV"))
         self.assertIn("customer_phone", self._sql("各客户的GMV和手机号"))
+
+
+class FallbackSplitTest(unittest.TestCase):
+    """规则 SQL 只在 app/fallback.py；agent.py 只留 LLM、校验、执行、重试。"""
+
+    def test_agent_has_no_rule_sql(self) -> None:
+        import app.agent as agent
+        self.assertFalse(hasattr(agent, "rule_based_sql"))
+        self.assertFalse(hasattr(agent, "METRIC_SQL"))
+        self.assertFalse(hasattr(agent, "RuleGenerator"))
+
+    def test_llm_generator_degrades_to_offline_fallback(self) -> None:
+        from app.fallback import OfflineFallback
+        self.assertIsInstance(LLMGenerator().fallback, OfflineFallback)
+        self.assertEqual(OfflineFallback.last_engine, "rule")
 
 
 class PromptContextTest(unittest.TestCase):

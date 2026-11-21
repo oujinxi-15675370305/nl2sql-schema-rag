@@ -159,6 +159,32 @@ prompt 里也没有表关系、指标过滤口径、日期写法。规则生成�
 评测也改成双模式：`--engine rule` 是 CI 默认（离线、确定性），`--engine llm` 手动跑；
 llm 模式逐条记录 `engine`，静默回退次数 >0 直接判失败，避免把规则成绩当成模型成绩。
 
+## 2026-11-21 LLM 是主线，规则是 fallback：用 10 条 hard cases 把差距写成数字
+
+Reviewer 打开仓库最先看到的事实，曾经是 `app/agent.py` 里整套 `rule_based_sql` / `METRIC_SQL` /
+JOIN 拼接模板，评测默认 `--engine rule`，CI 也只跑规则。于是很容易得出"这是模板引擎，模型可有可无"。
+真实情况正相反：主路径一直是模型，规则只是没 key 时的降级。
+
+做了三件事：
+
+1. 规则 SQL 整体搬到 `app/fallback.py`，`RuleGenerator` 改名 `OfflineFallback`，文件头写明
+   "离线回退 + CI 确定性基线，不是主路径"；`app/agent.py` 只留 `LLMGenerator` / `ScriptedGenerator` /
+   `build_context` / `validate` / `execute` / `ask`。行为不变：159 条测试全绿、规则 50/50、多轮 21/21。
+2. 新增 `eval/hard_cases.json`：10 条规则拼不出来的问法（IN 多值、季度、HAVING、任意 Top-N、占比、
+   复购、状态分布、滚动 7 天）。`--hard` 单独统计 `hard_*`，不并入基础 50 条。实测规则 **0/10**、
+   `deepseek-chat` **7–8/10**（连跑 4 次：8 / 7 / 8 / 8）。
+3. README 改成"检索 → 模型写 SQL → 校验 → 执行 → 失败重试"在前，规则 fallback 单独一节写定位。
+
+为什么保留规则（而不是删掉）：
+
+- CI 不配 key，需要离线、确定性的回归网，挡住检索/校验/权限/多轮这些与模型无关的退化；
+- 没 key / 模型超时失败时服务不能空转，`engine=rule` 让调用方看得出来；
+- 它是 hard 用例的对照组。没有这组基线，"模型必要"只是断言；有了它，差距是命令能复现的数字。
+
+hard 组不进 CI 门槛：规则分数天然低，设成门禁只会逼人删规则或改期望。模型失败的几条也照实留在
+README（Top-1 被 prompt 的 LIMIT 10 带偏、上季度写成最近三个月、复购偶发把 GROUP BY 写在外层），
+没有回头去改 `expected_sql`——那会把"证据"变成"凑数"。
+
 ## 还没想清楚
 
 - 指标口径冲突怎么办：同一个"客单价"，不同部门算法不一样。现在是单一 metric 定义，真做要加"口径版本"。

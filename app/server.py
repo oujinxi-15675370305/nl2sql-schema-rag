@@ -11,6 +11,7 @@ from app import demo
 from app.agent import ScriptedGenerator, ask
 from app.catalog import load_catalog
 from app.domain import Catalog, SQLPlan
+from app.evals import LLM_RESULT
 from app.permissions import AUDIT_LOG, DEFAULT_ROLE, ROLES, visible_catalog
 from app.retrieval import SchemaRetriever
 from app.session import SessionStore
@@ -30,6 +31,24 @@ def _role_of(raw: object) -> str:
 
 def _json(payload: dict, status: int = 200) -> tuple[int, str, bytes]:
     return status, "application/json; charset=utf-8", json.dumps(payload, ensure_ascii=False).encode()
+
+
+def _llm_result_payload(path: Path | None = None) -> dict:
+    """只读 `eval/llm_result.json`：有快照就返回，没有/坏了返回 `available=False`。
+
+    这里**绝不调用模型**：页面加载时只读文件；要更新快照得显式跑
+    `python -m scripts.record_llm_eval`（批处理，不进页面点击）。
+    """
+    target = path or LLM_RESULT
+    if not target.exists():
+        return {"available": False}
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"available": False}
+    if not isinstance(data, dict) or not isinstance(data.get("summary"), dict):
+        return {"available": False}
+    return {**data, "available": True}
 
 
 def _plan_payload(plan: SQLPlan, question: str) -> dict:
@@ -113,6 +132,9 @@ class Handler(BaseHTTPRequestHandler):
             summary.pop("multi_turn_details", None)  # 只留汇总；multi_turn_rate 等字段要保留
             status, ctype, body = _json(summary)
             return self._send(status, ctype, body)
+        if path == "/api/eval/llm/last":
+            # 只读最近一次模型评测的快照：不扫题库、不调模型（P1）
+            return self._send(*_json(_llm_result_payload()))
 
         rel = "index.html" if path in ("/", "") else path.lstrip("/")
         target = (WEB / rel).resolve()

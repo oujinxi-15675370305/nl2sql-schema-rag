@@ -6,11 +6,14 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import threading
 import unittest
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
+from pathlib import Path
+from unittest import mock
 
 from app.server import Handler
 
@@ -196,6 +199,38 @@ class AskApiTest(unittest.TestCase):
         self.assertGreaterEqual(data["multi_turn_total"], 9)
         self.assertIn("failure_counts", data)
         self.assertEqual(data["exec_rate"], 1.0)
+
+    def test_last_llm_eval_reads_artifact(self) -> None:
+        # AC-5.7：页面展示的"上次模型评测"来自只读 artifact，不在页面现场调模型
+        _, data = self._get("/api/eval/llm/last")
+        self.assertTrue(data["available"])
+        self.assertEqual(data["engine"], "llm")
+        self.assertTrue(data["model"])
+        self.assertTrue(data["generated_at"])
+        self.assertEqual(data["summary"]["fallbacks"], 0)
+
+    def test_last_llm_eval_missing_artifact_is_hidden(self) -> None:
+        # 反向用例：没有 artifact 时接口仍 200，但 available=False（前端据此隐藏）
+        with mock.patch("app.server.LLM_RESULT", Path("/nonexistent/llm_result.json")):
+            status, data = self._get("/api/eval/llm/last")
+        self.assertEqual(status, 200)
+        self.assertEqual(data, {"available": False})
+
+    def test_last_llm_eval_corrupt_artifact_is_hidden(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "llm_result.json"
+            path.write_text("{not json", encoding="utf-8")
+            with mock.patch("app.server.LLM_RESULT", path):
+                _, data = self._get("/api/eval/llm/last")
+        self.assertEqual(data, {"available": False})
+
+    def test_last_llm_eval_never_calls_model(self) -> None:
+        # 反向用例：把模型层和评测 runner 都换成炸弹，只读接口仍必须正常返回
+        with mock.patch("app.agent.llm_sql", side_effect=AssertionError("不应调用模型")), \
+                mock.patch("app.evals.run", side_effect=AssertionError("不应跑评测")):
+            status, data = self._get("/api/eval/llm/last")
+        self.assertEqual(status, 200)
+        self.assertTrue(data["available"])
 
 
 if __name__ == "__main__":

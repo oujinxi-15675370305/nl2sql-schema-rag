@@ -28,6 +28,9 @@ ROOT = Path(__file__).resolve().parent.parent
 CASES = ROOT / "eval" / "cases.json"
 MULTI_CASES = ROOT / "eval" / "multi_turn.json"
 HARD_CASES = ROOT / "eval" / "hard_cases.json"
+# 最近一次模型评测的只读快照：由 scripts/record_llm_eval.py 跑完写入，
+# 页面只读它（GET /api/eval/llm/last），不会现场调模型。
+LLM_RESULT = ROOT / "eval" / "llm_result.json"
 
 # 失败分类 → 中文说明（docs/SPEC.md AC-5.3；前端/文档引用同一套名字）
 FAILURE_LABELS = {

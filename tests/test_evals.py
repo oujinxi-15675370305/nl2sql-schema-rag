@@ -1,6 +1,9 @@
-"""M5 评测测试：用例覆盖、失败分类、多轮独立指标（AC-5.1 ~ AC-5.5）。"""
+"""M5 评测测试：用例覆盖、失败分类、多轮独立指标（AC-5.1 ~ AC-5.5）；
+规则覆盖外用例（eval/hard_cases.json）与 --hard runner 单独一组（AC-5.6）。"""
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import unittest
 from unittest import mock
@@ -8,7 +11,7 @@ from unittest import mock
 from app.agent import ScriptedGenerator, ask, execute, validate
 from app.catalog import load_catalog
 from app.domain import SchemaContext, SQLPlan
-from app.evals import CASES, MULTI_CASES, classify_failure, run
+from app.evals import CASES, HARD_CASES, LLM_RESULT, MULTI_CASES, classify_failure, main, run, run_hard
 from app.slots import DIMENSION_HINTS, extract_keywords
 
 TYPO_SQL = "SELECT COUNT(DISTINCT order_cnt) FROM orders WHERE status = 'paid' LIMIT 10"
@@ -245,6 +248,95 @@ class EngineModeTest(unittest.TestCase):
         self.assertEqual(summary["multi_turn_engine_counts"], {"rule": 20})
         self.assertEqual(summary["multi_turn_fallbacks"],
                          sum(summary["multi_turn_engine_counts"].values()))
+
+
+class HardCaseSetTest(unittest.TestCase):
+    """AC-5.6：规则覆盖外用例要手写、可执行，而且真的会走到生成（不能先被路由拦掉）。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.catalog = load_catalog()
+        cls.cases = json.loads(HARD_CASES.read_text(encoding="utf-8"))["cases"]
+
+    def test_at_least_ten_unique_cases(self) -> None:
+        self.assertGreaterEqual(len(self.cases), 10)
+        ids = [case["id"] for case in self.cases]
+        self.assertEqual(len(ids), len(set(ids)), "id 不能复用")
+        for case in self.cases:
+            self.assertTrue(case["question"])
+            self.assertIn("expected_sql", case)
+
+    def test_expected_sql_is_valid_and_executable(self) -> None:
+        # 期望 SQL 是手写的：打错表名/列名时先红在这一层，而不是记成"模型答错"
+        for case in self.cases:
+            ok, message = validate(case["expected_sql"], self.catalog)
+            self.assertTrue(ok, f"#{case['id']} 期望 SQL 不合法：{message}")
+            query = case["expected_sql"]
+            if "limit" not in query.lower():
+                query += " LIMIT 200"
+            try:
+                execute(query)
+            except Exception as exc:
+                self.fail(f"#{case['id']} 期望 SQL 执行失败：{exc}")
+
+    def test_every_case_routes_to_ask(self) -> None:
+        # 被路由成澄清/超纲时模型根本不会写 SQL，这组就测不到生成能力了
+        for case in self.cases:
+            plan = ask(case["question"], catalog=self.catalog, use_llm=False)
+            self.assertEqual(plan.intent, "ask", f"#{case['id']} 被路由成 {plan.intent}")
+
+
+class HardRunnerTest(unittest.TestCase):
+    """AC-5.6：--hard 单独统计，不并入基础 50 条；rule 是天然对照组，不进 CI 门槛。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.cases = json.loads(HARD_CASES.read_text(encoding="utf-8"))["cases"]
+
+    def test_hard_summary_is_separate_from_base(self) -> None:
+        summary = run_hard(verbose=False)
+        self.assertEqual(summary["hard_total"], len(self.cases))
+        self.assertEqual(summary["hard_engine_counts"], {"rule": summary["hard_total"]})
+        self.assertEqual(summary["hard_fallbacks"], 0)
+        self.assertEqual(summary["hard_bad_expected"], 0)
+        self.assertEqual(len(summary["hard_details"]), summary["hard_total"])
+        # 不并进基础用例：没有 total / exec_rate 这些单轮字段
+        self.assertNotIn("total", summary)
+        self.assertNotIn("exec_rate", summary)
+
+    def test_hard_cli_runs_offline(self) -> None:
+        # load_env 会读仓库根的 .env（有 key）：测试里要挡掉，保证离线、不碰网络
+        buffer = io.StringIO()
+        with mock.patch("app.evals.load_env", return_value=0), \
+                contextlib.redirect_stdout(buffer):
+            code = main(["--hard", "--json"])
+        self.assertEqual(code, 0)
+        data = json.loads(buffer.getvalue())
+        self.assertEqual(data["hard_total"], len(self.cases))
+        self.assertIn("hard_rate", data)
+
+
+class LlmResultArtifactTest(unittest.TestCase):
+    """AC-5.7：最近一次模型评测的只读快照。测试只读文件，不触发任何模型调用。"""
+
+    def test_artifact_shape_and_no_secret(self) -> None:
+        raw = LLM_RESULT.read_text(encoding="utf-8")
+        data = json.loads(raw)
+        self.assertEqual(data["engine"], "llm")
+        self.assertTrue(data["model"])
+        self.assertTrue(data["generated_at"])
+        summary = data["summary"]
+        self.assertEqual(summary["exec_match"], summary["ask_total"])
+        self.assertEqual(summary["multi_turn_match"], summary["multi_turn_total"])
+        self.assertGreaterEqual(summary["hard_total"], 10)
+        self.assertGreaterEqual(summary["hard_samples"], 1)
+        self.assertLessEqual(summary["hard_match_min"], summary["hard_match_max"])
+        self.assertEqual(summary["fallbacks"], 0)
+        self.assertNotIn("details", summary)  # 只存汇总，不存逐条明细
+        # 只读快照里不能出现密钥/请求头
+        self.assertNotIn("sk-", raw.lower())
+        self.assertNotIn("api_key", raw.lower())
+        self.assertNotIn("authorization", raw.lower())
 
 
 if __name__ == "__main__":

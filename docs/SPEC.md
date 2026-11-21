@@ -4,7 +4,7 @@
 
 ## 0. 一句话
 
-给数据仓库做 NL2SQL：先把问题缩到「指标 / 表 / 列」，再生成 SQL，校验、执行；错了能带着报错自己改（默认最多 2 次）；不是问数的问题不硬编 SQL，答案要能追到口径。
+给数据仓库做 NL2SQL：先把问题缩到「指标 / 表 / 列」，再由**大模型**在缩小的 schema 里写 SQL，代码校验、执行；错了带着报错重试（默认最多 2 次）；不是问数的问题不硬编 SQL，答案要能追到口径。规则模板退到离线 fallback，只在没 key / 模型故障时兜底，同时是 CI 的确定性回归基线。主路径是 `检索 → LLM → 校验 → 执行 → 带错误重试`，规则不是主路径（见 `app/fallback.py`）。
 
 ## 1. 目标（做完这几件就算完成）
 
@@ -85,6 +85,11 @@
 - **AC-5.5**：多轮评测独立文件 `eval/multi_turn.json`（≥ 3 个会话 × ≥ 3 轮，现 7 × 3 = 21，含客户维度回环与
   "改成华南"改写），用同一个 `Session` 顺序跑、逐轮比执行结果；指标为 `multi_turn_rate`，
   **不并入**单轮 `exec_rate`（否则历史数字不可比）。
+- **AC-5.6**：规则覆盖外的问法独立成组 `eval/hard_cases.json`（≥ 10 条：IN 多值筛选 / 季度 / HAVING /
+  任意 Top-N / 占比 / 复购 / 状态分布 / 滚动 7 天），`--hard` 单独跑并输出
+  `hard_total / hard_match / hard_rate / hard_engine_counts`，**不并入**基础单轮与多轮；
+  期望 SQL 手写、必须过校验与执行，且用例不能被路由提前判成 clarify/unsafe（否则测不到生成）。
+  该组只作"规则 vs 模型"的证据，**不作 CI 门槛**（CI 仍只跑 `--engine rule` 的基础集）。
 
 ### M6 交付物：Docker + 截图 + GIF（P1）
 
@@ -168,8 +173,9 @@ GET /api/health → { ok, tables, metrics, roles }
 | M1/M2 审核修复 | ✅ 已完成 | 2026-11-13 |
 | M3 多轮追问 | ✅ 已完成 | 35 条测试（AC-3.1~3.6，含标签覆盖/客户维度回环）；顺序 `session → 槽位继承 → classify → 生成`，classify 只收槽位；会话进程内、默认 5 轮 |
 | M4 权限与脱敏 | ✅ 已完成 | 29 条权限测试 + 7 条 HTTP 契约；顺序 `role → 裁剪 catalog → 槽位 → classify → 检索/生成`；列白名单（含禁 `*`）、裸投影掩码 + 值兜底、审计；2026-11-16 审核补了两条绕过路径 |
-| M5 评测与 CI | ✅ 已完成 | 57 条单轮（50 问数 + 7 意图/越权；6 指标 × 6 维度、31/36 组合、6 类时间）+ 7 会话 21 轮多轮评测；失败分类（routed/permission/validate/field/syntax/timeout/retrieval/result/intent）汇总；CI 三门槛 90% + artifact；扩容时修了退款率二次舍入；`--engine llm` 实测 deepseek-chat 单轮 50/50、多轮 21/21、回退 0（2026-11-20） |
-| M6 Docker + 截图/GIF | ✅ 已完成 | `docker compose up --build` 起 8000（容器内 seed、healthcheck、空 volume 补 seed）；`scripts/shots.py` 固定脚本产出 3 图 + 1 GIF；离线演示修复走 `/api/demo/repair`（脚本化生成器，不写会话、不参与评测）；159 个单测 |
+| M5 评测与 CI | ✅ 已完成 | 57 条单轮（50 问数 + 7 意图/越权；6 指标 × 6 维度、31/36 组合、6 类时间）+ 7 会话 21 轮多轮评测；失败分类（routed/permission/validate/field/syntax/timeout/retrieval/result/intent）汇总；CI 三门槛 90% + artifact；扩容时修了退款率二次舍入；`--engine llm` 实测 deepseek-chat 单轮 50/50、多轮 21/21、回退 0（2026-11-20）；规则覆盖外 10 条（AC-5.6）规则 0/10、模型 7–8/10（4 次采样） |
+| M6 Docker + 截图/GIF | ✅ 已完成 | `docker compose up --build` 起 8000（容器内 seed、healthcheck、空 volume 补 seed）；`scripts/shots.py` 固定脚本产出 3 图 + 1 GIF；离线演示修复走 `/api/demo/repair`（脚本化生成器，不写会话、不参与评测）；166 个单测 |
+| LLM 主线化 / 规则 fallback（2026-11-20） | ✅ 已完成 | 规则 SQL 移到 `app/fallback.py`（`OfflineFallback`，离线降级 + CI 基线），`agent.py` 只留 LLM/校验/执行/重试；新增 `eval/hard_cases.json` 10 条与 `--hard` runner（单独统计、不进 CI）；README/SPEC/decisions 改成模型主线；166 测试全绿，CI 仍只跑 `--engine rule` |
 
 ## 8. 开发约定
 

@@ -19,8 +19,8 @@
         <option value="viewer">只读访客</option>
       </select>
       <button id="btn-new" class="ghost">新会话</button>
-      <button id="btn-demo" class="ghost" title="离线演示：第一次故意写错列名，再带报错改对">演示修复</button>
-      <button id="btn-eval" class="ghost">跑评测</button>
+      <button id="btn-demo" class="ghost" title="固定 SQL 演示：两条 SQL 写死，不调模型；只演示「写错列名 → 带报错改对」的时间线">演示修复</button>
+      <button id="btn-eval" class="ghost" title="走离线规则基线（CI 用，约 2ms）；模型评测用 python -m app.evals --engine llm">跑评测</button>
       <a id="link-schema" class="ghost" href="/api/schema">看 schema</a>
     </div>
   </header>
@@ -31,7 +31,7 @@
       <textarea id="q" rows="3" placeholder="例如：上个月各地区的 GMV 是多少？"></textarea>
       <div class="samples"></div>
       <button id="btn-run" class="primary">生成并执行</button>
-      <p class="hint">离线模式：不配置 LLM_API_KEY 时用规则生成 SQL；配置后走大模型。</p>
+      <p class="hint">主路径走大模型（配置 LLM_API_KEY，约 0.8s/条）；没 key 或请求失败时降级到规则 fallback（约 2ms）。每次结果都会标出这次是谁生成的。</p>
 
       <div class="panel-block">
         <h3>命中的 schema</h3>

@@ -35,6 +35,14 @@ const INTENT_LABEL = {
   unsafe: "越权 / 写操作",
 };
 
+// 结果里的 engine 是服务端下发的：llm=模型、rule=规则 fallback、custom=脚本化演示。
+// 不标出来，页面只能靠耗时猜（模型 ~0.8s，规则 ~2ms），这正是最容易被误读的地方。
+const ENGINE_LABEL = {
+  llm: "模型生成",
+  rule: "规则 fallback",
+  custom: "固定 SQL 演示",
+};
+
 const INTENT_SAMPLES = ["上个月的GMV", "各地区的订单数"];
 
 const CONTEXT_ROWS = [
@@ -164,8 +172,9 @@ function renderResult(data) {
   const masked = (data.masked_columns || []).length
     ? ` · 已掩码：${data.masked_columns.join(", ")}`
     : "";
+  const engine = ENGINE_LABEL[data.engine] || data.engine || "未知来源";
   metaEl.textContent =
-    `${data.rows.length} 行 · ${data.elapsed_ms} ms${masked}${tries > 1 ? ` · 第 ${tries} 次尝试成功` : ""}`;
+    `${engine} · ${data.rows.length} 行 · ${data.elapsed_ms} ms${masked}${tries > 1 ? ` · 第 ${tries} 次尝试成功` : ""}`;
   setState("完成", "ok");
 }
 
@@ -207,10 +216,11 @@ async function run(question) {
 
 // M6 演示：没配 LLM key 时规则生成器不会写错列，页面上看不到修复过程；
 // 这里用服务端的脚本化生成器复现"写错列名 → 带报错改对"，不写会话、不参与评测。
+// 注意：两条 SQL 是写死的（engine=custom），既不是规则生成，也不是模型生成。
 async function runDemoRepair() {
   btnDemo.disabled = true;
   sessionId = "";  // 演示不写会话，也不该让下一句继承演示前的旧上下文
-  setState("演示：第一次故意写错列名…", "loading");
+  setState("演示：固定 SQL，不调模型…", "loading");
   clearResult();
   try {
     const data = await postJson("/api/demo/repair", { role });
@@ -266,8 +276,11 @@ $("#btn-eval").addEventListener("click", async () => {
     const res = await fetch("/api/eval");
     const s = await res.json();
     const asks = s.ask_total ?? s.total;
+    // 页面上的「跑评测」走服务端 run() 默认引擎 = rule：离线、2ms，是 CI 回归基线。
+    // 模型成绩需要 CLI：python -m app.evals --engine llm（约 1 分钟），不要看混。
+    const engineLabel = s.engine === "llm" ? "模型" : "离线规则基线";
     setState(
-      `评测 ${s.total} 条（问数 ${asks}）：执行一致率 ${(s.exec_rate * 100).toFixed(1)}%（${s.exec_match}/${asks}）` +
+      `评测（${engineLabel}）${s.total} 条（问数 ${asks}）：执行一致率 ${(s.exec_rate * 100).toFixed(1)}%（${s.exec_match}/${asks}）` +
         ` · 意图 ${(s.intent_rate * 100).toFixed(1)}% · 多轮 ${(s.multi_turn_rate * 100).toFixed(1)}%` +
         `（${s.multi_turn_match}/${s.multi_turn_total}）· 平均 ${s.avg_ms} ms`,
       "ok"
