@@ -4,8 +4,9 @@ from __future__ import annotations
 import unittest
 from unittest import mock
 
-from app.agent import RuleGenerator, ScriptedGenerator, ask
+from app.agent import ScriptedGenerator, ask
 from app.catalog import load_catalog
+from app.fallback import OfflineFallback
 
 GOOD_SQL = "SELECT COUNT(DISTINCT order_id) FROM orders WHERE status = 'paid' LIMIT 10"
 TYPO_SQL = "SELECT COUNT(DISTINCT order_cnt) FROM orders WHERE status = 'paid' LIMIT 10"
@@ -79,7 +80,7 @@ class RepairTest(unittest.TestCase):
 
     def test_engine_reports_which_generator_ran(self) -> None:
         # 排查"配了 key 却一直走规则"：返回值要说清这次是谁生成的
-        self.assertEqual(ask("多少单", catalog=self.catalog, generator=RuleGenerator()).engine, "rule")
+        self.assertEqual(ask("多少单", catalog=self.catalog, generator=OfflineFallback()).engine, "rule")
         scripted = ask("多少单", catalog=self.catalog, generator=ScriptedGenerator([GOOD_SQL]))
         self.assertEqual(scripted.engine, "custom")
 

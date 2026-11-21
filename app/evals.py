@@ -3,6 +3,8 @@
 - 单轮：执行结果一致率是主指标，SQL 字面匹配只作参考（同一个问题可以写出多种等价 SQL）。
 - 多轮：`eval/multi_turn.json` 用同一个 `Session` 顺序跑，单独算 `multi_turn_rate`，
   **不并进单轮**——混在一起历史数字就不可比了。
+- hard：`eval/hard_cases.json` 是规则覆盖外的问法（IN / 季度 / HAVING / 占比 / 复购…），
+  单独算 `hard_rate`，用 `--hard` 跑；它不并入单轮、也不作 CI 门槛，是"规则 vs 模型"的证据。
 - 失败：每条失败用例带 `failure` 分类，`summary.failure_counts` 汇总（AC-5.3）。
   分类靠 `ask()` 记下的 `failure_stage`（validate / execute / timeout），
   只有执行阶段的两个错误码（字段不存在 / 语法错）需要再看一眼错误信息。
@@ -25,6 +27,7 @@ from app.session import Session
 ROOT = Path(__file__).resolve().parent.parent
 CASES = ROOT / "eval" / "cases.json"
 MULTI_CASES = ROOT / "eval" / "multi_turn.json"
+HARD_CASES = ROOT / "eval" / "hard_cases.json"
 
 # 失败分类 → 中文说明（docs/SPEC.md AC-5.3；前端/文档引用同一套名字）
 FAILURE_LABELS = {
@@ -312,6 +315,81 @@ def run_multi_turn(catalog: Catalog | None = None, verbose: bool = True, engine:
     }
 
 
+def run_hard(catalog: Catalog | None = None, verbose: bool = True, engine: str = "rule") -> dict:
+    """规则覆盖外的一组用例（`eval/hard_cases.json`）：单独统计，**不并入基础 50 条**。
+
+    这组用例专门问规则拼不出来的东西（IN / 季度 / HAVING / 任意 Top-N / 占比 / 复购 /
+    状态分布 / 滚动 7 天），用来把"模型不是可有可无"写成数字，不是 CI 门槛：
+    `rule` 在这里天然低分，跑它是对照组。`engine="llm"` 才需要 key，静默回退照样计数
+    并由 `main()` 判失败，避免把规则成绩当成模型成绩。
+    """
+    catalog = catalog or load_catalog()
+    cases = _load(HARD_CASES, "cases")
+    use_llm = engine == "llm"
+    details: list[dict] = []
+    hit = 0
+    bad_expected = 0
+    failure_counts: Counter[str] = Counter()
+    engine_counts: Counter[str] = Counter()
+    latencies: list[int] = []
+
+    for case in cases:
+        started = time.time()
+        plan = ask(case["question"], catalog=catalog, use_llm=use_llm)
+        latencies.append(int((time.time() - started) * 1000))
+        engine_counts[plan.engine] += 1
+
+        expected_rows, expected_error = _expected_result(case["expected_sql"], catalog)
+        bad_expected += int(bool(expected_error))
+        matched = _matched(plan, expected_rows, expected_error)
+        failure = classify_failure(plan, matched)
+        hit += int(matched)
+        if failure:
+            failure_counts[failure] += 1
+
+        details.append({
+            "id": case["id"],
+            "question": case["question"],
+            "note": case.get("note", ""),
+            "engine": plan.engine,
+            "sql": plan.sql,
+            "expected_sql": case["expected_sql"],
+            "ok": plan.ok,
+            "error": plan.error or expected_error,
+            "failure": failure,
+            "failure_stage": plan.failure_stage,
+            "exec_match": matched,
+            "rows": len(plan.rows) if plan.ok else 0,
+            "ms": plan.elapsed_ms,
+        })
+        if verbose:
+            flag = "[PASS]" if matched else "[FAIL]"
+            print(f"{flag} H{case['id']:>2} {case['question']}  ({plan.elapsed_ms}ms, {details[-1]['rows']} 行)")
+            if not matched:
+                actual = " ".join((plan.sql or "(空)").split())[:100]
+                print(f"    生成：{actual}")
+                print(f"    期望：{' '.join(case['expected_sql'].split())[:100]}")
+                stage = f"，stage={plan.failure_stage}" if plan.failure_stage else ""
+                print(f"    分类：{failure}（{FAILURE_LABELS.get(failure, failure)}）{stage}")
+                if plan.error:
+                    print(f"    错误：{plan.error}")
+
+    total = len(details)
+    return {
+        "hard_total": total,
+        "hard_match": hit,
+        "hard_rate": round(hit / total, 4) if total else 0.0,
+        "hard_engine": engine,
+        "hard_engine_counts": dict(sorted(engine_counts.items())),
+        "hard_failure_counts": dict(sorted(failure_counts.items())),
+        "hard_fallbacks": sum(v for k, v in engine_counts.items() if k != "llm") if use_llm else 0,
+        # 期望 SQL 是手写的：它自己不合法/跑不通时单独计数，不能混进"模型答错"
+        "hard_bad_expected": bad_expected,
+        "hard_avg_ms": int(sum(latencies) / total) if total else 0,
+        "hard_details": details,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="NL→SQL 评测：单轮执行一致率、多轮一致率、失败分类")
     parser.add_argument("--json", action="store_true", help="输出 JSON（CI/前端用）")
@@ -319,13 +397,20 @@ def main(argv: list[str] | None = None) -> int:
                         help="单轮执行一致率门槛，默认 0.9（SPEC 门槛 0.85，CI 按 0.9 卡）")
     parser.add_argument("--min-intent", type=float, default=0.9, help="单轮意图命中率门槛，默认 0.9")
     parser.add_argument("--min-multi", type=float, default=0.9, help="多轮执行一致率门槛，默认 0.9")
-    parser.add_argument("--multi-turn", action="store_true", help="只跑多轮评测（调试用）")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--multi-turn", action="store_true", help="只跑多轮评测（调试用）")
+    mode.add_argument("--hard", action="store_true",
+                      help="只跑规则覆盖外的 hard cases（eval/hard_cases.json），"
+                           "单独统计、不并入基础 50 条、不设门槛：它是规则 vs 模型的证据")
     parser.add_argument("--engine", choices=("rule", "llm"), default="rule",
                         help="rule=离线规则（CI 默认）；llm=真实模型（需 LLM_API_KEY，静默回退会判失败）")
     args = parser.parse_args(argv)
     load_env(ROOT / ".env")  # 本地跑 --engine llm 时读 key；CI 没有 .env 会自动跳过
 
-    if args.multi_turn:
+    if args.hard:
+        summary = run_hard(verbose=not args.json, engine=args.engine)
+        checks: list[tuple[str, float, float]] = []  # hard 只报数字，不设门槛
+    elif args.multi_turn:
         summary = run_multi_turn(verbose=not args.json, engine=args.engine)
         checks = [("多轮一致率", summary["multi_turn_rate"], args.min_multi)]
     else:
@@ -339,13 +424,23 @@ def main(argv: list[str] | None = None) -> int:
     failed = [(label, value, limit) for label, value, limit in checks if value < limit]
     fallbacks = 0
     if args.engine == "llm":
-        fallbacks = summary.get("fallbacks", 0) + summary.get("multi_turn_fallbacks", 0)
+        fallbacks = (summary.get("fallbacks", 0) + summary.get("multi_turn_fallbacks", 0)
+                     + summary.get("hard_fallbacks", 0))
+    bad_expected = summary.get("hard_bad_expected", 0)
 
     if args.json:
         print(json.dumps(summary, ensure_ascii=False, indent=1))
     else:
         print("-" * 60)
-        if args.multi_turn:
+        if args.hard:
+            print(f"hard {summary['hard_total']} 条（规则覆盖外）| 命中率 {summary['hard_rate']:.1%} "
+                  f"({summary['hard_match']}/{summary['hard_total']}) | 平均 {summary['hard_avg_ms']}ms")
+            counts = summary["hard_failure_counts"]
+            print("失败分类：" + ("无" if not counts else " / ".join(f"{k} {v}" for k, v in counts.items())))
+            if bad_expected:
+                print(f"未达标：hard 用例的 expected_sql 自身有问题 {bad_expected} 条"
+                      "（先修期望 SQL，它不算模型答错）")
+        elif args.multi_turn:
             print(f"多轮 {summary['multi_turn_total']} 轮 | 一致率 {summary['multi_turn_rate']:.1%} "
                   f"({summary['multi_turn_match']}/{summary['multi_turn_total']})")
         else:
@@ -366,7 +461,7 @@ def main(argv: list[str] | None = None) -> int:
         if fallbacks:
             print(f"未达标：LLM 静默回退 {fallbacks} 次（这轮结果其实是规则跑的）")
 
-    return 1 if (failed or fallbacks) else 0
+    return 1 if (failed or fallbacks or bad_expected) else 0
 
 
 if __name__ == "__main__":

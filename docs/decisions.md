@@ -136,6 +136,29 @@ M4 的 P0 是"单轮 22 条全绿、多轮算错"，而单轮评测完全看不�
 
 这样"演示"和"真实能力"的边界是清楚的：README 的已知问题里写明它只证明时间线与重试链路，真实修复仍然要配 LLM。
 
+## 2026-11-20 模型跑起来后的第一课：68% → 100% 靠补上下文，不是换模型
+
+第一次用 `deepseek-chat` 跑 50 条问数只有 **34/50（68%）**。失败全不是语法问题：
+`GROUP BY o.region_name`（列不存在）、`o.order_id = c.customer_id`（乱连表）、漏 `status='paid'`、
+多选了 customer_id、把 `SUM(item_amount)` 当 GMV、把 `'now'` 拿去 `substr`。
+
+根因是给模型看的上下文是残的：`SchemaContext.ddl()` 只渲染检索命中的列，JOIN 键被裁掉了；
+prompt 里也没有表关系、指标过滤口径、日期写法。规则生成器不读 DDL，所以单测和规则评测都发现不了。
+
+修法（同一模型，只改上下文和 prompt）：
+
+- DDL 强制带上主外键 / status / order_date / 指标 `requires` 点名的列；
+- `catalog.json` 增加 `relations`，prompt 里列出"只能按这些连表"；
+- 指标 / 维度 / 筛选用到的表若被 top-4 挤掉，就用它替换得分最低的无关表（如"家电品类成交额"必须带 orders）；
+- prompt 写死口径（哪些指标过滤 paid、退款率不过滤）、日期写法、只选要求的列、排名才 LIMIT 10、GMV 只能用 `pay_amount`；
+- 加一个 few-shot 例子。
+
+结果：50/50 单轮、21/21 多轮、静默回退 0、平均约 0.8s。**模型没换**——这个 schema 上 `deepseek-chat` 足够，
+先补上下文再谈换更强的模型；`reasoner`/`qwen-max` 可以作为下一步 A/B，但不是当前瓶颈。
+
+评测也改成双模式：`--engine rule` 是 CI 默认（离线、确定性），`--engine llm` 手动跑；
+llm 模式逐条记录 `engine`，静默回退次数 >0 直接判失败，避免把规则成绩当成模型成绩。
+
 ## 还没想清楚
 
 - 指标口径冲突怎么办：同一个"客单价"，不同部门算法不一样。现在是单一 metric 定义，真做要加"口径版本"。

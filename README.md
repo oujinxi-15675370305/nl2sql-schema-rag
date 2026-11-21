@@ -59,19 +59,34 @@ Compose 只把 8000 绑到 `127.0.0.1`，避免把无鉴权的 demo / 审计接�
 想跑评测：
 
 ```bash
-python -m app.evals                 # 单轮 + 多轮，打印每条用例
+python -m app.evals                 # 单轮 + 多轮，规则模式（CI 默认）
+python -m app.evals --engine llm    # 走真实模型（需要 .env 里的 LLM_API_KEY）
 python -m app.evals --multi-turn    # 只跑多轮评测
 python -m app.evals --json          # 输出 JSON，CI 用
 python -m unittest discover -s tests -v
 ```
 
+## 开发环境
+
+运行时零依赖，Python >= 3.10 都能跑；仓库本身不绑定解释器，推荐用仓库里的 `.venv`（uv 管理）：
+
+| 场景 | 解释器 |
+|---|---|
+| PyCharm | `.venv`（uv，Python 3.12.13；`.python-version` 固定 3.12） |
+| 命令行 | `.venv/Scripts/python`（Windows）或系统 `python`（3.13 也验证过） |
+| CI | 3.11 |
+
+`uv.lock` 已提交，`uv sync --extra dev` 可复现开发环境。`dev` extra 只装 Pillow（给 `scripts/shots.py` 合成 GIF），运行时仍然零依赖。
+
 ## 现在的结果
 
-57 条单轮用例（50 条问数 + 7 条意图/越权），**问数执行结果一致率 100%**（50/50）、意图命中 100%（57/57）；另有 7 个会话 × 3 轮的多轮评测，逐轮执行一致率 100%（21/21）；平均 2ms（规则模式，不含模型调用）。155 个单测覆盖检索、生成、校验、修复、路由、多轮、权限、评测和 HTTP 契约。
+57 条单轮用例（50 条问数 + 7 条意图/越权），**问数执行结果一致率 100%**（50/50）、意图命中 100%（57/57）；另有 7 个会话 × 3 轮的多轮评测，逐轮执行一致率 100%（21/21）；规则模式平均 2ms。159 个单测覆盖检索、生成、校验、修复、路由、多轮、权限、评测和 HTTP 契约。
 
-评测集覆盖 6 个指标 × 6 个维度（31/36 组合，customer 维度只留 1 条连通性用例）、6 类时间过滤，以及 chat / 澄清 / 超纲 / 写操作 / 越权 5 类非问数意图，失败分类见下面「评测与 CI」。
+**真实模型（`deepseek-chat`，2026-11-24，temperature 0，单次运行）**：单轮 **50/50**、多轮 **21/21**、静默回退 **0**、平均约 0.8s/条。规则模式仍是 CI 默认（离线、确定性）；LLM 成绩用 `--engine llm` 手动复现，见「评测与 CI」。
 
-注意这是**规则模式的成绩**，不能当"模型准确率"看：规则只覆盖了 6 个维度、6 个指标的组合，样本也少。接大模型后的真实表现要重测，见下面「已知问题」。
+评测集覆盖 6 个指标 × 6 个维度（31/36 组合，customer 维度只留 1 条连通性用例）、6 类时间过滤，以及 chat / 澄清 / 超纲 / 写操作 / 越权 5 类非问数意图。
+
+规则模式的 100% 不能当"模型准确率"看：规则只覆盖了 6 个维度、6 个指标的组合，样本也少；真实模型数字见上面和「已知问题」。
 
 ## 页面长什么样
 
@@ -181,6 +196,14 @@ curl -s 'localhost:8000/api/schema?role=viewer'
 
 **失败分类**：失败用例带 `failure` 字段，`summary.failure_counts` / `multi_turn_failure_counts` 分别汇总——`routed`（路由拦截）/ `permission`（权限）/ `validate`（校验）/ `field`（字段不存在）/ `syntax`（生成语法错）/ `timeout`（超时）/ `retrieval`（检索未命中）/ `result`（结果不一致）/ `intent`（意图不符）。分类先看 `ask()` 记录的 `attempts[].stage`；只有执行阶段再按错误码区分 `field` / `syntax`（`no such column` / `syntax error`）。
 
+**真实模型模式**（需要 `LLM_API_KEY`）：
+
+```bash
+python -m app.evals --engine llm
+```
+
+`2026-11-24`、`deepseek-chat`、temperature 0 的单次结果：**单轮 50/50、多轮 21/21、静默回退 0、平均约 0.8s/条**。每条 details 都带 `engine`；`engine=rule` 表示请求失败退回了规则——这种情况 `main()` 直接退出码 1，避免把"LLM 100%"实际上是规则跑出来的成绩当真。CI 默认仍用 rule（离线、确定性），LLM 评测是手动步骤。
+
 阈值：SPEC 门槛 85%，CI 按 90% 卡；意图命中率、多轮一致率同为 90%。CI 跑单测 + 评测（`timeout-minutes: 10`），评测 JSON 作为 artifact 上传，失败时能直接看哪条挂了。
 
 ```bash
@@ -220,13 +243,14 @@ app/
   web/              问数页面（原生 JS，无构建）
 Dockerfile          容器镜像（python:3.11-slim，构建时 seed）
 docker-compose.yml  一条命令启动
+uv.lock / .python-version  开发环境锁定（uv，运行不需要）
 eval/cases.json     57 条单轮（50 问数 + 7 意图/越权）
 eval/multi_turn.json 7 个会话 × 3 轮多轮对照
 scripts/seed_demo_db.py
 scripts/demo_repair.py  演示"写错列名 → 带报错改对"
 scripts/shots.py    固定截图脚本（无头 Chrome + GIF）
 docs/screenshots/   3 张截图 + 多轮 GIF
-tests/              155 个单测（含 HTTP 契约）
+tests/              159 个单测（含 HTTP 契约）
 docs/decisions.md   几个取舍的记录
 ```
 
@@ -244,7 +268,9 @@ docs/decisions.md   几个取舍的记录
 - **审计在进程内**（环形缓冲 100 条），重启即清空，也没有鉴权入口——demo 只做到可观测。role 同样由客户端声明（`{"role": "analyst"}`），没有认证：这是权限**策略**演示，不是账号体系。
 - **demo 只有 5 张表**：检索最多带 4 张，缩表的收敛收益仍然有限，真正收敛的是列（24 → 12）和指标（6 → 3）。
 - **列检索的稠密部分是近似**（字符 n-gram 哈希），换成真 embedding 后指标会变，现在的成绩不可直接对比。
-- **评测集 57 条仍是规则模式、自己写的**：覆盖 6 指标 × 6 维度，但 customer 维度只有 1 条、多轮只有 7 个会话 21 轮，有过拟合的嫌疑；下一步要拿真实提问继续补。
+- **评测集 57 条仍是自己写的**：覆盖 6 指标 × 6 维度（31/36）、多轮 7 个会话 21 轮，有过拟合的嫌疑；真实模型 50/50 是单次采样，下一步要拿真实提问继续补。
+- **LLM 评测是单次采样**：`deepseek-chat` 在 temperature 0 下仍偶有波动（出现过 49/50）；复现建议连跑 2~3 次取均值，换模型或改 prompt 后要重跑。
+- **模型效果依赖上下文质量**：这次把 JOIN 键、表关系、指标过滤规则补进 prompt 后，同一模型从 68% 到 100%；换 schema 或指标口径时要同步维护 `catalog.json` 的 relations 和 prompt 规则。
 
 ## 下一步
 

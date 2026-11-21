@@ -7,16 +7,15 @@ import unittest
 from unittest import mock
 
 from app.agent import (
-    METRIC_SQL,
     QueryTimeout,
     build_context,
     execute,
     llm_sql,
-    rule_based_sql,
     validate,
 )
 from app.catalog import load_catalog
 from app.evals import normalize, run as run_eval
+from app.fallback import METRIC_SQL, rule_based_sql
 from app.retrieval import SchemaRetriever, rrf, tokenize
 
 

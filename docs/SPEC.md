@@ -72,7 +72,9 @@
   （customer 维度按客户分组语义特殊，只留 1 条连通性用例，不铺满 6 条）；时间过滤覆盖 ≥ 5 类
   （现 6 类：上个月 / 本月 / 今年 / 去年 / 最近 30 天 / 指定月份）；非问数意图 chat / clarify /
   out_of_scope / unsafe 各至少 1 条（含 1 条 viewer 越权），否则"意图命中率"没有意义。
-- **AC-5.2**：主指标为执行结果一致率；SPEC 门槛 ≥ 85%，CI 按 ≥ 90% 卡，低于阈值退出码 1。
+- **AC-5.2**：主指标为执行结果一致率；SPEC 门槛 ≥ 85%，CI 按 ≥ 90% 卡，低于阈值退出码 1。支持
+  `--engine rule|llm`：rule 是 CI 默认（离线、确定性）；llm 需要 `LLM_API_KEY`，逐条记录 `engine`，
+  静默回退（engine=rule）次数 > 0 直接退出码 1，避免"假 LLM 成绩"。
 - **AC-5.3**：输出失败分类：`routed`（路由拦截）/ `permission`（权限）/ `validate`（校验）/
   `field`（字段不存在）/ `syntax`（生成语法错）/ `timeout`（执行超时）/ `retrieval`（检索未命中）/
   `result`（结果不一致）/ `intent`（意图不符）。每条用例带 `failure`，`summary.failure_counts` 与
@@ -166,8 +168,8 @@ GET /api/health → { ok, tables, metrics, roles }
 | M1/M2 审核修复 | ✅ 已完成 | 2026-11-13 |
 | M3 多轮追问 | ✅ 已完成 | 35 条测试（AC-3.1~3.6，含标签覆盖/客户维度回环）；顺序 `session → 槽位继承 → classify → 生成`，classify 只收槽位；会话进程内、默认 5 轮 |
 | M4 权限与脱敏 | ✅ 已完成 | 29 条权限测试 + 7 条 HTTP 契约；顺序 `role → 裁剪 catalog → 槽位 → classify → 检索/生成`；列白名单（含禁 `*`）、裸投影掩码 + 值兜底、审计；2026-11-16 审核补了两条绕过路径 |
-| M5 评测与 CI | ✅ 已完成 | 57 条单轮（50 问数 + 7 意图/越权；6 指标 × 6 维度、31/36 组合、6 类时间）+ 7 会话 21 轮多轮评测；失败分类（routed/permission/validate/field/syntax/timeout/retrieval/result/intent）汇总；CI 三门槛 90% + artifact；扩容时修了退款率二次舍入 |
-| M6 Docker + 截图/GIF | ✅ 已完成 | `docker compose up --build` 起 8000（容器内 seed、healthcheck、空 volume 补 seed）；`scripts/shots.py` 固定脚本产出 3 图 + 1 GIF；离线演示修复走 `/api/demo/repair`（脚本化生成器，不写会话、不参与评测）；155 个单测 |
+| M5 评测与 CI | ✅ 已完成 | 57 条单轮（50 问数 + 7 意图/越权；6 指标 × 6 维度、31/36 组合、6 类时间）+ 7 会话 21 轮多轮评测；失败分类（routed/permission/validate/field/syntax/timeout/retrieval/result/intent）汇总；CI 三门槛 90% + artifact；扩容时修了退款率二次舍入；`--engine llm` 实测 deepseek-chat 单轮 50/50、多轮 21/21、回退 0（2026-11-20） |
+| M6 Docker + 截图/GIF | ✅ 已完成 | `docker compose up --build` 起 8000（容器内 seed、healthcheck、空 volume 补 seed）；`scripts/shots.py` 固定脚本产出 3 图 + 1 GIF；离线演示修复走 `/api/demo/repair`（脚本化生成器，不写会话、不参与评测）；159 个单测 |
 
 ## 8. 开发约定
 
