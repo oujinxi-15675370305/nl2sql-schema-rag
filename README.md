@@ -29,7 +29,7 @@
 - **模型写 SQL**：prompt 里只有命中的 schema（DDL + 指标口径 + 表关系），`temperature=0`，返回 `engine="llm"`。规则模板不在主路径；只有没配 key、请求失败或调用方显式 `use_llm=False` 时才启用 `app/fallback.py` 的 `OfflineFallback`（返回 `engine="rule"`）。
 - **权限与脱敏**：角色（`analyst` / `viewer`）按请求传；`viewer` 的 catalog 里没有敏感列，生成器拿不到、prompt 里也没有。掩码在服务端结果行上做，`masked_columns` 会告诉前端哪些列被掩过。
 - **多轮**：带 `session_id` 时，先从上文补缺失槽位，再判意图。"那上个月呢""换成华南"能接上；换了指标又没指代算新话题。会话只在内存里，默认留 5 轮。
-- **意图路由**：五类意图（问数 / 闲聊 / 缺信息 / 超纲 / 越权），规则优先、可解释。只有"问数"会生成 SQL，其余返回话术或澄清项，不会硬编一条 SQL 出来。
+- **意图路由**：五类意图（问数 / 闲聊 / 缺信息 / 超纲 / 越权），规则优先、可解释。只有"问数"会生成 SQL，其余返回话术或澄清项，不会硬编一条 SQL 出来。只问「有哪些 / 列出」某个维度且已识别到维度时，不需要指标也按问数处理，交给模型写 `SELECT DISTINCT`（例如「华东地区有哪些商品类别」）。
 - **三路检索**：指标、表、列分别建索引。列用关键词为主（列名要精确命中），指标和表稠密+关键词各占一半，最后 RRF 融合。
 - **裁剪**：只渲染命中的表和列，通常 30 行以内；指标把口径描述一起带上。
 - **校验**：只允许单条 SELECT、表白名单、禁 DDL/DML、执行时只读连接 + 限行 + 5 秒语句级超时。字段名写错不靠提示词保证，靠数据库报错兜住。
@@ -70,6 +70,7 @@ python -m app.evals --engine llm    # 单轮 + 多轮走真实模型（需要 .e
 python -m app.evals --multi-turn    # 只跑多轮评测
 python -m app.evals --hard          # 只跑规则覆盖外的 10 条（默认仍是规则，作对照组）
 python -m app.evals --hard --engine llm   # 同一组走真实模型，命令行里能直接对比
+python -m scripts.record_llm_eval   # 跑真实模型评测并写 eval/llm_result.json（页面只读它）
 python -m app.evals --json          # 输出 JSON，CI 用
 python -m unittest discover -s tests -v
 ```
@@ -90,7 +91,7 @@ python -m unittest discover -s tests -v
 
 **真实模型（`deepseek-chat`，temperature 0，2026-11-24）**：单轮 **50/50**、意图 **57/57**、多轮 **21/21**、静默回退 **0**、平均约 **0.7s/条**（`--engine llm` 单次运行）。同一套检索/校验/权限链路，只把生成器换成模型。
 
-**离线基线（规则 fallback，CI 默认）**：单轮 50/50、多轮 21/21、平均约 2ms——它是确定性的回归网，不是"模型准确率"。166 个单测覆盖检索、生成、校验、修复、路由、多轮、权限、评测、hard runner、fallback 拆分和 HTTP 契约。
+**离线基线（规则 fallback，CI 默认）**：单轮 50/50、多轮 21/21、平均约 2ms——它是确定性的回归网，不是"模型准确率"。175 个单测覆盖检索、生成、校验、修复、路由、多轮、权限、评测、hard runner、fallback 拆分、模型快照和 HTTP 契约。
 
 两个模式的分工：
 
@@ -98,7 +99,7 @@ python -m unittest discover -s tests -v
 |---|---|---|
 | 基础 50 条问数 | 50/50 | 50/50 |
 | 多轮 21 轮 | 21/21 | 21/21 |
-| 规则覆盖外 10 条 | **0/10** | **7–8/10**（4 次采样） |
+| 规则覆盖外 10 条 | **0/10** | **6–8/10**（多次采样；最近快照 6–8/10） |
 | 静默回退 | — | 0 |
 | 平均耗时 | ~2ms | ~0.7s |
 | 跑在哪 | CI（离线）、无 key 降级 | 生产主路径、手动评测 |
@@ -129,7 +130,7 @@ python -m unittest discover -s tests -v
 | 评测集 | 规则 fallback | LLM (deepseek-chat) |
 |---|---|---|
 | 基础 50 条 | 50/50 | 50/50 |
-| 规则覆盖外 10 条 | **0/10** | **7–8/10**（4 次采样：8 / 7 / 8 / 8） |
+| 规则覆盖外 10 条 | **0/10** | **6–8/10**（多次采样；最近一批 4 次为 6–8，见 `eval/llm_result.json`） |
 
 模型的失败也照实写：稳定的两条是 **Top-1** 被 prompt 里"排名 → LIMIT 10"带偏成 10 行、
 **上季度**被写成"最近三个月"而不是上一个日历季度；「复购客户数」在 4 次里有 1 次把 `GROUP BY`
@@ -144,12 +145,14 @@ python -m unittest discover -s tests -v
 
 ```bash
 python -m app.evals --hard                 # 规则 0/10，平均 2ms
-python -m app.evals --hard --engine llm    # 模型 7–8/10，静默回退 0
+python -m app.evals --hard --engine llm    # 模型 6–8/10，静默回退 0
 ```
 
 ## 页面长什么样
 
-每条结果都会标出来源：**模型生成**（主路径）、**规则 fallback**（没 key / 请求失败时的降级）、**固定 SQL 演示**（「演示修复」按钮，两条 SQL 写死，不调模型）；右上角「跑评测」走的是**离线规则基线**（约 2ms，CI 用），模型评测要用 `python -m app.evals --engine llm`。
+每条结果都会标出来源：**模型生成**（主路径）、**规则 fallback**（没 key / 请求失败时的降级）、**固定 SQL 演示**（「演示修复」按钮，两条 SQL 写死，不调模型）；右上角「**跑离线基线**」跑的是离线规则基线（约 2ms，CI 用），页面不会现场调模型。配置过模型评测后，左栏会多一条「上次模型评测」，数字来自只读快照 `eval/llm_result.json`，没有就隐藏。
+
+界面是浅色工作台：左侧提问、中间结果、右侧 schema / 模型快照；窄屏自动堆叠。
 
 **analyst：手机号在结果行上掩码**（点图看原尺寸）
 
@@ -265,13 +268,61 @@ curl -s 'localhost:8000/api/schema?role=viewer'
 python -m app.evals --engine llm
 ```
 
-`2026-11-24`、`deepseek-chat`、temperature 0：**单轮 50/50、意图 57/57、多轮 21/21、hard 7–8/10（4 次采样）、静默回退 0、平均约 0.7s/条**。每条 details 都带 `engine`；`engine=rule` 表示请求失败退回了规则——这种情况 `main()` 直接退出码 1，避免把"LLM 100%"实际上是规则跑出来的成绩当真。CI 默认仍用 rule（离线、确定性）跑基础集，LLM 与 `--hard` 是手动步骤。
+`2026-11-24`、`deepseek-chat`、temperature 0：**单轮 50/50、意图 57/57、多轮 21/21、hard 6–8/10（多次采样；最近快照 6–8/10）、静默回退 0、平均约 0.7s/条**。每条 details 都带 `engine`；`engine=rule` 表示请求失败退回了规则——这种情况 `main()` 直接退出码 1，避免把"LLM 100%"实际上是规则跑出来的成绩当真。CI 默认仍用 rule（离线、确定性）跑基础集，LLM 与 `--hard` 是手动步骤。
 
 阈值：SPEC 门槛 85%，CI 按 90% 卡；意图命中率、多轮一致率同为 90%。CI 跑单测 + 评测（`timeout-minutes: 10`），评测 JSON 作为 artifact 上传，失败时能直接看哪条挂了。
 
 ```bash
 python -m app.evals --threshold 0.9 --min-intent 0.9 --min-multi 0.9 --json
 ```
+
+### 页面评测 vs 模型评测
+
+页面按钮叫「**跑离线基线**」，只跑 `engine=rule` 的离线规则集：57 条单轮 + 21 轮多轮，约 2ms，和 CI 是同一套。它不调模型、不落盘，结果提示里会写 `engine=rule`。
+
+| | 页面「跑离线基线」 | 模型评测（CLI） |
+|---|---|---|
+| 触发 | 点按钮 / `GET /api/eval` | `python -m app.evals --engine llm` |
+| 生成器 | 规则 fallback（离线） | `deepseek-chat` |
+| 范围 | 57 单轮 + 21 多轮 | 同左；hard 另跑 `--hard --engine llm` |
+| 耗时 | ~2ms | ~1 分钟 |
+| 确定性 | 完全确定 | 温度 0 仍有采样波动 |
+| 用途 | CI 回归、离线演示 | 发布前手动跑、能力证据 |
+| 结果 | 不落盘 | 写 `eval/llm_result.json`（只读快照） |
+
+**为什么不在页面点一次跑一次模型**：一次模型评测要 70 次生成请求（50 条单轮问数 + 20 轮多轮问数；7 条意图/澄清不生成 SQL），约 1 分钟、有成本，而且温度 0 也仍有采样波动；挂在按钮上既慢又不可重复。同类项目也都把模型评测放在 CLI/脚本里，页面只做交互查询。
+
+页面读最近一次快照：`GET /api/eval/llm/last` → `eval/llm_result.json`；有就显示「上次模型评测：deepseek-chat · 2026-11-24 · 基础 50/50 · 多轮 21/21 · hard 6–8/10 · 回退 0」，没有（或文件坏了）就隐藏。快照由脚本生成：
+
+```bash
+python -m scripts.record_llm_eval                 # 基础 + 多轮 + hard × 4（约 2 分钟）
+python -m scripts.record_llm_eval --hard-runs 2   # 少跑几次 hard
+```
+
+脚本只从 `run()` / `run_hard()` 的汇总里取字段，`details` / `multi_turn_details` 全部丢掉；静默回退 >0 或 hard 期望 SQL 自身报错时直接失败、不写文件。artifact 里只有模型名、日期和汇总，没有任何 key。页面加载和单测都只读这个文件，不会触发模型调用。
+
+## 公开 benchmark（BIRD / Spider）：现在只做评估，不接
+
+**结论：不接。** 现有的 hard 组已经回答了"模型是不是可有可无"（规则 0/10 vs 模型 6–8/10）；公开集是外部有效性的加分项，不是前置条件。仓库里**没有任何 BIRD/Spider 分数**，也不准备在没有真跑过的情况下写一个。
+
+如果以后要接，工作量不是"半天"：
+
+| 数据集 | 形态 | 建议抽样 | 粗估 |
+|---|---|---|---|
+| Spider 1.0 dev | 1034 题，SQLite，schema 简单 | 100–200 题 | ~1 天 |
+| BIRD mini-dev | 真实脏数据 + evidence，难度更高 | 100–200 题 | ~1–1.5 天 |
+| DuSQL | 中文原生；官方只有 schema/content JSON，要自己建 201 个库、修 gold SQL | 100–200 题 | ~1–2 天 |
+
+接的话必须遵守（否则分数不可信）：
+
+1. **独立 `benchmarks/`**：不并进 `app/evals.py` 的题库，也不进 CI；benchmark 是手动/夜间任务。
+2. **通用 schema 模式**：只给表/列/外键，不给 `catalog.json` 里的业务指标口径和 `METRIC_SQL`；否则 prompt 会拿业务定义去套公开库。
+3. **关掉自动 `LIMIT`**：产品里的 `execute(max_rows=200)` 和期望 SQL 的 `LIMIT 200` 会截断 gold 结果，benchmark 要直连只读连接执行。
+4. **严格 / 宽松两种 EX 都报**（本项目的两种口径）：严格 = 列数一致 + 行集合一致；宽松 = 忽略列顺序/列选择差异，只比对是否覆盖 gold 行。只报严格会低估，只报宽松会虚高。
+5. **打乱题目**：有些集按模板排序，取前 N 条会虚高（有项目实测过 70% → 40% 的差距）；固定 seed 并写进报告。
+6. **不要用测试题调 prompt 后再报同一批题**，留一部分不看；公开集通常明显低于自建集，这很正常，把限制写清楚。
+
+**不并进 CI**：CI 只跑离线规则回归（`--engine rule`，10 分钟超时），公开集是手动/夜间任务。
 
 ## 配置
 
@@ -301,9 +352,9 @@ app/
   agent.py          主路径：LLM 生成、校验、执行、带报错重试、ask()
   fallback.py       规则模板（离线降级 + CI 确定性基线，不是主路径）
   demo.py           离线演示修复用的固定 SQL（M6）
-  evals.py          评测（单轮执行一致 / 多轮 / hard / 失败分类）
+  evals.py          评测（单轮执行一致 / 多轮 / hard / 失败分类 / 模型快照路径）
   env.py            .env 读取（标准库实现）
-  server.py         HTTP 服务
+  server.py         HTTP 服务（含只读 /api/eval/llm/last）
   web/              问数页面（原生 JS，无构建）
 Dockerfile          容器镜像（python:3.11-slim，构建时 seed）
 docker-compose.yml  一条命令启动
@@ -311,18 +362,20 @@ uv.lock / .python-version  开发环境锁定（uv，运行不需要）
 eval/cases.json     57 条单轮（50 问数 + 7 意图/越权）
 eval/multi_turn.json 7 个会话 × 3 轮多轮对照
 eval/hard_cases.json 规则覆盖外 10 条（`--hard`，规则 vs 模型的证据）
+eval/llm_result.json 最近一次模型评测的只读快照（页面只读它，不含 key/明细）
 scripts/seed_demo_db.py
 scripts/demo_repair.py  演示"写错列名 → 带报错改对"
+scripts/record_llm_eval.py  跑真实模型评测并写 eval/llm_result.json（不进页面/CI）
 scripts/shots.py    固定截图脚本（无头 Chrome + GIF）
 docs/screenshots/   3 张截图 + 多轮 GIF
-tests/              166 个单测（含 hard runner、fallback 拆分与 HTTP 契约）
+tests/              175 个单测（含 hard runner、模型快照、HTTP 契约）
 docs/decisions.md   几个取舍的记录
 ```
 
 ## 已知问题
 
 - **规则 fallback 只支持单指标 + 单维度**（FIXME 在 `app/fallback.py`）。「各品牌客单价和销量对比」会退化；模型路径没有这个限制，但这组评测仍以单指标为主。
-- **规则 fallback 覆盖窄**（这正是它只配做 fallback 的原因）：时间只认上个月/本月/今年/去年/最近 30 天/具体月份；IN、HAVING、季度、占比、复购、任意 Top-N、状态分布都拼不出来。`eval/hard_cases.json` 实测 **0/10**，模型 7–8/10。
+- **规则 fallback 覆盖窄**（这正是它只配做 fallback 的原因）：时间只认上个月/本月/今年/去年/最近 30 天/具体月份；IN、HAVING、季度、占比、复购、任意 Top-N、状态分布都拼不出来，维度清单（有哪些X）也只有模型路径支持（没 key 时规则会按指标兜底，可能答非所问，`engine=rule` 会标出来）。`eval/hard_cases.json` 实测 **0/10**，模型 6–8/10。
 - **自我修复在离线模式下是空转**：`OfflineFallback` 不看 `feedback`，同一句 SQL 会重复生成；页面的「演示修复」和 `scripts/demo_repair.py` 用脚本化生成器复现"写错列名 → 改对"，真实修复要配 `LLM_API_KEY`。
 - **演示修复端点只用于展示**：`/api/demo/repair` 固定两条 SQL、不写会话、不参与评测；它证明的是时间线和重试链路，不代表模型能力。
 - **Compose 是单机 demo**：没有 TLS、认证、持久卷策略；真要部署，先补这几样再谈生产。
@@ -334,9 +387,10 @@ docs/decisions.md   几个取舍的记录
 - **demo 只有 5 张表**：检索最多带 4 张，缩表的收敛收益仍然有限，真正收敛的是列（24 → 12）和指标（6 → 3）。
 - **列检索的稠密部分是近似**（字符 n-gram 哈希），换成真 embedding 后指标会变，现在的成绩不可直接对比。
 - **评测集仍是自己写的**：基础 57 条（6 指标 × 6 维度 31/36、多轮 7 会话 21 轮）+ hard 10 条，都有过拟合嫌疑；下一步要拿真实提问继续补。
-- **LLM 基础评测是单次采样**：`deepseek-chat` 在 temperature 0 下仍偶有波动（出现过 49/50）；hard 组连跑 4 次为 7–8/10。换模型或改 prompt 后要重跑，别把单次数字当能力上下限。
-- **模型在规则覆盖外仍有失败**：hard 组稳定失败两条——「退款率最高的品类」被 prompt 的"排名 → LIMIT 10"带偏成 10 行；「上季度GMV」写成最近三个月而不是上一个日历季度；「复购客户数」偶发把 `GROUP BY` 写在外层。这些是提示词/语义理解的边界，没有为了好看去改期望 SQL。
+- **LLM 基础评测是单次采样**：`deepseek-chat` 在 temperature 0 下仍偶有波动（出现过 49/50）；hard 组多次采样为 6–8/10（最近一批 4 次为 6–8）。换模型或改 prompt 后要重跑，别把单次数字当能力上下限。
+- **模型在规则覆盖外仍有失败**：hard 组常见的失败是——「退款率最高的品类」被 prompt 的"排名 → LIMIT 10"带偏成 10 行；「上季度GMV」写成最近三个月而不是上一个日历季度；「复购客户数」偶发把 `GROUP BY` 写在外层。这些是提示词/语义理解的边界，没有为了好看去改期望 SQL。
 - **模型效果依赖上下文质量**：这次把 JOIN 键、表关系、指标过滤规则补进 prompt 后，同一模型从 68% 到 100%；换 schema 或指标口径时要同步维护 `catalog.json` 的 relations 和 prompt 规则。
+- **公开 benchmark 未接**：BIRD/Spider/DuSQL 只有方案评估（见上），仓库里没有它们的分数；接的话是独立的 1–2 天任务，不进 CI。
 
 ## 下一步
 
@@ -344,7 +398,9 @@ docs/decisions.md   几个取舍的记录
 - [x] 列级权限与脱敏（不同角色看不到的字段要过滤，且不进 prompt/结果）
 - [x] 评测补到 50 条 + CI 门禁 + 失败分类（检索未命中 / 语法错 / 字段不存在 / 结果不一致）+ 多轮评测
 - [x] Docker Compose、截图与 GIF
-- [x] LLM 主线化：规则 SQL 移到 `app/fallback.py`，hard 10 条把"规则 0/10 vs 模型 7–8/10"写成数字
+- [x] LLM 主线化：规则 SQL 移到 `app/fallback.py`，hard 10 条把"规则 0/10 vs 模型 6–8/10"写成数字
+- [x] 页面只跑离线基线；模型成绩读 `eval/llm_result.json`，不在点击时调模型
+- [x] BIRD/Spider/DuSQL 方案评估（结论：现在不接，理由与工作量见上）
 - [ ] 接 Qdrant + ES，把内存索引换掉
 
 ## License

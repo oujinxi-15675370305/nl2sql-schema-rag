@@ -10,6 +10,11 @@ const answerEl = $("#answer");
 const attemptsEl = $("#attempts");
 const rewriteEl = $("#rewrite");
 const roleEl = $("#role");
+const llmLastEl = $("#llm-last");
+const llmLastCardEl = $("#llm-last-card");
+const engineBadgeEl = $("#engine-badge");
+const emptyStateEl = $("#empty-state");
+const sqlBlockEl = $("#sql-block");
 
 // M3：会话 id 由服务端下发；带上它才能接上文（"那上个月呢"）
 let sessionId = "";
@@ -42,6 +47,7 @@ const ENGINE_LABEL = {
   rule: "规则 fallback",
   custom: "固定 SQL 演示",
 };
+const ENGINE_CLASS = { llm: "engine-llm", rule: "engine-rule", custom: "engine-custom" };
 
 const INTENT_SAMPLES = ["上个月的GMV", "各地区的订单数"];
 
@@ -56,24 +62,56 @@ function escapeHtml(text) {
   return String(text ?? "").replace(/[&<>"']/g, (c) => map[c]);
 }
 
+function setEngineBadge(engine) {
+  if (!engineBadgeEl) return;
+  if (!engine) {
+    engineBadgeEl.hidden = true;
+    return;
+  }
+  engineBadgeEl.textContent = ENGINE_LABEL[engine] || engine;
+  engineBadgeEl.className = "engine-badge " + (ENGINE_CLASS[engine] || "");
+  engineBadgeEl.hidden = false;
+}
+
+// SQL 高亮的输入是模型生成的文本，必须先按 token 切分再逐段转义，不能先转义
+// （转义会把引号变成 &#39;，字符串 token 就匹配不到了）。
+const SQL_TOKEN = /('[^']*')|(--[^\n]*)|(\b(?:SELECT|FROM|WHERE|JOIN|LEFT|RIGHT|INNER|OUTER|FULL|CROSS|ON|AND|OR|NOT|IN|IS|NULL|AS|GROUP\s+BY|ORDER\s+BY|LIMIT|OFFSET|HAVING|WITH|OVER|PARTITION\s+BY|CASE|WHEN|THEN|ELSE|END|DISTINCT|COUNT|SUM|AVG|MIN|MAX|ROUND|COALESCE|CAST|DATE|SUBSTR|STRFTIME|UNION|ALL|DESC|ASC|BETWEEN|LIKE)\b)/gi;
+
+function highlightSql(sql) {
+  if (!sql) return "";
+  SQL_TOKEN.lastIndex = 0;
+  let out = "";
+  let last = 0;
+  let match;
+  while ((match = SQL_TOKEN.exec(sql)) !== null) {
+    out += escapeHtml(sql.slice(last, match.index));
+    const cls = match[1] ? "sql-str" : match[2] ? "sql-comment" : "sql-kw";
+    out += `<span class="${cls}">${escapeHtml(match[0])}</span>`;
+    last = match.index + match[0].length;
+  }
+  out += escapeHtml(sql.slice(last));
+  return out;
+}
+
 function setState(text, kind = "") {
   stateEl.className = "state " + kind;
   stateEl.textContent = text;
 }
 
 function renderTags(el, items, kind) {
+  const label = `<span class="tag-label">${kind}</span>`;
   if (!items || !items.length) {
-    el.innerHTML = `<span class="muted">${kind} —</span>`;
+    el.innerHTML = `${label}<span class="muted">—</span>`;
     return;
   }
-  el.innerHTML = items
+  el.innerHTML = label + items
     .map((it) => `<span class="tag">${escapeHtml(it.key)}${it.table ? " · " + escapeHtml(it.table) : ""}</span>`)
     .join("");
 }
 
 function clearTags() {
   CONTEXT_ROWS.forEach(([sel, label]) => {
-    $(sel).innerHTML = `<span class="muted">${label} —</span>`;
+    $(sel).innerHTML = `<span class="tag-label">${label}</span><span class="muted">—</span>`;
   });
 }
 
@@ -82,14 +120,24 @@ function renderTable(columns, rows) {
     tableWrap.innerHTML = `<div class="empty">没有数据</div>`;
     return;
   }
-  const head = `<thead><tr>${columns.map((c) => `<th>${escapeHtml(c)}</th>`).join("")}</tr></thead>`;
+  const numeric = columns.map((_, index) =>
+    rows.every((row) => row[index] === null || typeof row[index] === "number")
+  );
+  const head = `<thead><tr>${columns
+    .map((c, index) => `<th${numeric[index] ? ' class="num"' : ""}>${escapeHtml(c)}</th>`)
+    .join("")}</tr></thead>`;
   const body = rows
-    .map(
-      (r) =>
-        `<tr>${r
-          .map((v) => `<td>${v === null ? "NULL" : typeof v === "number" ? Number(v).toLocaleString("zh-CN", { maximumFractionDigits: 2 }) : escapeHtml(v)}</td>`)
-          .join("")}</tr>`
-    )
+    .map((r) => {
+      const cells = r.map((v) => {
+        if (v === null) return `<td class="null">NULL</td>`;
+        if (typeof v === "number") {
+          const text = Number(v).toLocaleString("zh-CN", { maximumFractionDigits: 2 });
+          return `<td class="num">${text}</td>`;
+        }
+        return `<td>${escapeHtml(v)}</td>`;
+      });
+      return `<tr>${cells.join("")}</tr>`;
+    })
     .join("");
   tableWrap.innerHTML = `<table>${head}<tbody>${body}</tbody></table>`;
 }
@@ -134,11 +182,47 @@ function clearResult() {
   tableWrap.innerHTML = "";
   answerEl.innerHTML = "";
   attemptsEl.innerHTML = "";
+  setEngineBadge(null);
+  if (emptyStateEl) emptyStateEl.hidden = true;
+  if (sqlBlockEl) sqlBlockEl.hidden = false;
   clearTags();
+}
+
+// 上次模型评测：读只读快照（GET /api/eval/llm/last），没有就隐藏整张卡片。
+// 页面任何点击都不会现场调模型；更新快照用 python -m scripts.record_llm_eval。
+async function loadLastLlmEval() {
+  if (!llmLastEl || !llmLastCardEl) return;
+  try {
+    const res = await fetch("/api/eval/llm/last");
+    const data = await res.json();
+    const s = data.summary || {};
+    if (!data.available || !s.ask_total) {
+      llmLastCardEl.hidden = true;
+      return;
+    }
+    const hard = s.hard_match_min === s.hard_match_max
+      ? `${s.hard_match_max}/${s.hard_total}`
+      : `${s.hard_match_min}–${s.hard_match_max}/${s.hard_total}`;
+    const date = (data.generated_at || "").slice(0, 10);
+    llmLastEl.innerHTML =
+      `<span class="llm-model"><span class="llm-dot"></span>${escapeHtml(data.model || "模型")}` +
+      `<span class="llm-date">${escapeHtml(date)}</span></span>` +
+      `<span class="llm-metrics">` +
+      `<span>基础 <b>${s.exec_match}/${s.ask_total}</b></span>` +
+      `<span>多轮 <b>${s.multi_turn_match}/${s.multi_turn_total}</b></span>` +
+      `<span>hard <b>${hard}</b></span>` +
+      `<span>回退 <b>${s.fallbacks ?? 0}</b></span>` +
+      `</span>`;
+    llmLastEl.hidden = false;
+    llmLastCardEl.hidden = false;
+  } catch (e) {
+    llmLastCardEl.hidden = true;
+  }
 }
 
 // ask 与 demo 端点返回同一份结构，渲染只写这一套
 function renderResult(data) {
+  if (emptyStateEl) emptyStateEl.hidden = true;
   // 服务端可能新开一个会话，后续请求带上它（演示接口不建会话，回空就不动）
   if (data.session_id) sessionId = data.session_id;
   // M3：告诉用户这句被补了什么，不然"那上个月呢"的结果看着像凭空来的
@@ -148,16 +232,20 @@ function renderResult(data) {
 
   // M2：非 ask 不生成 SQL，页面显示意图话术而不是"失败"
   if (data.intent && data.intent !== "ask") {
+    setEngineBadge(null);
+    if (sqlBlockEl) sqlBlockEl.hidden = true;  // 没有 SQL 就不摆一个空的 SQL 框
     renderReply(data, INTENT_SAMPLES);
     setState(`意图：${INTENT_LABEL[data.intent] || data.intent}`, "info");
     return;
   }
 
+  setEngineBadge(data.engine);
+  if (sqlBlockEl) sqlBlockEl.hidden = false;
   renderAttempts(data.attempts);
 
   if (!data.ok) {
     setState(`失败：${data.error || "未知错误"}`, "error");
-    sqlEl.textContent = data.sql || "—";
+    sqlEl.innerHTML = data.sql ? highlightSql(data.sql) : "—";
     return;
   }
 
@@ -166,15 +254,14 @@ function renderResult(data) {
   renderTags($("#ctx-tables"), ctx.tables, "表");
   renderTags($("#ctx-columns"), ctx.columns, "列");
   renderTable(data.columns, data.rows);
-  sqlEl.textContent = data.sql;
+  sqlEl.innerHTML = highlightSql(data.sql);
   const tries = (data.attempts || []).length;
   // M4：服务端掩码过的列在这里点出来，避免把 138****0047 当成真实数据
   const masked = (data.masked_columns || []).length
     ? ` · 已掩码：${data.masked_columns.join(", ")}`
     : "";
-  const engine = ENGINE_LABEL[data.engine] || data.engine || "未知来源";
   metaEl.textContent =
-    `${engine} · ${data.rows.length} 行 · ${data.elapsed_ms} ms${masked}${tries > 1 ? ` · 第 ${tries} 次尝试成功` : ""}`;
+    `${data.rows.length} 行 · ${data.elapsed_ms} ms${masked}${tries > 1 ? ` · 第 ${tries} 次尝试成功` : ""}`;
   setState("完成", "ok");
 }
 
@@ -236,6 +323,7 @@ async function runDemoRepair() {
 function resetView(stateText) {
   sessionId = "";
   clearResult();
+  if (emptyStateEl) emptyStateEl.hidden = false;
   if (stateText) setState(stateText, "info");
 }
 
@@ -259,6 +347,7 @@ roleEl.addEventListener("change", () => {
 });
 
 syncRole();
+loadLastLlmEval();
 
 $("#q").addEventListener("keydown", (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key === "Enter") run();
@@ -276,11 +365,11 @@ $("#btn-eval").addEventListener("click", async () => {
     const res = await fetch("/api/eval");
     const s = await res.json();
     const asks = s.ask_total ?? s.total;
-    // 页面上的「跑评测」走服务端 run() 默认引擎 = rule：离线、2ms，是 CI 回归基线。
-    // 模型成绩需要 CLI：python -m app.evals --engine llm（约 1 分钟），不要看混。
-    const engineLabel = s.engine === "llm" ? "模型" : "离线规则基线";
+    // 「跑离线基线」= 服务端 run() 默认 engine=rule：离线、2ms，是 CI 回归基线。
+    // 这里不调模型；模型成绩看 artifact（loadLastLlmEval）或 CLI。
+    const engineLabel = s.engine === "llm" ? "模型评测" : "离线规则基线";
     setState(
-      `评测（${engineLabel}）${s.total} 条（问数 ${asks}）：执行一致率 ${(s.exec_rate * 100).toFixed(1)}%（${s.exec_match}/${asks}）` +
+      `${engineLabel}（engine=${s.engine}）${s.total} 条（问数 ${asks}）：执行一致率 ${(s.exec_rate * 100).toFixed(1)}%（${s.exec_match}/${asks}）` +
         ` · 意图 ${(s.intent_rate * 100).toFixed(1)}% · 多轮 ${(s.multi_turn_rate * 100).toFixed(1)}%` +
         `（${s.multi_turn_match}/${s.multi_turn_total}）· 平均 ${s.avg_ms} ms`,
       "ok"

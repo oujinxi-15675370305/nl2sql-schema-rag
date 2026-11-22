@@ -9,6 +9,8 @@ from unittest import mock
 from app.agent import (
     LLMGenerator,
     QueryTimeout,
+    ScriptedGenerator,
+    ask,
     build_context,
     execute,
     llm_sql,
@@ -118,6 +120,104 @@ class FallbackSplitTest(unittest.TestCase):
         self.assertEqual(OfflineFallback.last_engine, "rule")
 
 
+class DimensionListingTest(unittest.TestCase):
+    """没有指标的维度清单（"华东有哪些商品类别"）：不澄清，走 SELECT DISTINCT 生成。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.catalog = load_catalog()
+        cls.retriever = SchemaRetriever(cls.catalog)
+
+    def test_context_carries_orders_without_metric(self) -> None:
+        # 没有指标时也要靠 orders 才能把地区连到商品；否则模型只能拿到孤立的维表
+        ctx, _ = build_context("华东地区有哪些商品类别", self.catalog, self.retriever)
+        names = ctx.table_names()
+        for table in ("orders", "order_items", "products", "regions"):
+            self.assertIn(table, names)
+
+    def test_dimension_listing_plan_executes(self) -> None:
+        sql = (
+            "SELECT DISTINCT p.category FROM orders o "
+            "JOIN order_items i ON i.order_id = o.order_id "
+            "JOIN products p ON p.product_id = i.product_id "
+            "JOIN regions r ON r.region_id = o.region_id "
+            "WHERE o.status = 'paid' AND r.region_name = '华东'"
+        )
+        plan = ask("华东地区门店有哪些商品类别", catalog=self.catalog,
+                   generator=ScriptedGenerator([sql]))
+        self.assertEqual(plan.intent, "ask")
+        self.assertTrue(plan.ok, plan.error)
+        self.assertGreaterEqual(len(plan.rows), 1)
+        self.assertEqual(plan.engine, "custom")
+
+
+class ComplexSqlTest(unittest.TestCase):
+    """复杂 SQL（CTE + 窗口函数）也要能过校验、执行；不只支持单层 GROUP BY。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.catalog = load_catalog()
+
+    def test_cte_window_top_n_plan_executes(self) -> None:
+        sql = (
+            "WITH ranked AS ("
+            "SELECT p.category, p.product_name, ROUND(SUM(o.pay_amount), 2) AS gmv, "
+            "ROW_NUMBER() OVER (PARTITION BY p.category ORDER BY SUM(o.pay_amount) DESC) AS rn "
+            "FROM orders o "
+            "JOIN order_items i ON i.order_id = o.order_id "
+            "JOIN products p ON p.product_id = i.product_id "
+            "JOIN regions r ON r.region_id = o.region_id "
+            "WHERE o.status = 'paid' AND r.region_name = '华东' "
+            "GROUP BY p.category, p.product_name"
+            ") SELECT category, product_name, gmv FROM ranked WHERE rn <= 2 "
+            "ORDER BY category, gmv DESC"
+        )
+        plan = ask("华东每个品类销售额前两名商品", catalog=self.catalog,
+                   generator=ScriptedGenerator([sql]))
+        self.assertEqual(plan.intent, "ask")
+        self.assertTrue(plan.ok, plan.error)
+        self.assertEqual(len(plan.rows), 8)  # 4 个品类 × 前 2 名
+
+
+class SqlShapeGuardTest(unittest.TestCase):
+    """只换筛选条件时：多选筛选列 / 丢筛选 → 当 validate 失败，带 feedback 重写。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.catalog = load_catalog()
+
+    def test_extra_filter_column_triggers_rewrite(self) -> None:
+        bad = (
+            "SELECT r.region_name, ROUND(SUM(o.pay_amount), 2) AS gmv "
+            "FROM orders o JOIN regions r ON r.region_id = o.region_id "
+            "WHERE o.status = 'paid' AND r.region_name = '华东'"
+        )
+        good = (
+            "SELECT ROUND(SUM(o.pay_amount), 2) AS gmv "
+            "FROM orders o JOIN regions r ON r.region_id = o.region_id "
+            "WHERE o.status = 'paid' AND r.region_name = '华东'"
+        )
+        plan = ask("华东的GMV", catalog=self.catalog,
+                   generator=ScriptedGenerator([bad, good]), max_repair=1)
+        self.assertTrue(plan.ok, plan.error)
+        self.assertEqual(len(plan.attempts), 2)
+        self.assertEqual(plan.attempts[0]["stage"], "validate")
+        self.assertIn("筛选列", plan.attempts[0]["error"])
+
+    def test_missing_filter_triggers_rewrite(self) -> None:
+        bad = "SELECT ROUND(SUM(o.pay_amount), 2) AS gmv FROM orders o WHERE o.status = 'paid'"
+        good = (
+            "SELECT ROUND(SUM(o.pay_amount), 2) AS gmv FROM orders o "
+            "JOIN regions r ON r.region_id = o.region_id "
+            "WHERE o.status = 'paid' AND r.region_name = '华东'"
+        )
+        plan = ask("华东的GMV", catalog=self.catalog,
+                   generator=ScriptedGenerator([bad, good]), max_repair=1)
+        self.assertTrue(plan.ok, plan.error)
+        self.assertEqual(len(plan.attempts), 2)
+        self.assertIn("保留", plan.attempts[0]["error"])
+
+
 class PromptContextTest(unittest.TestCase):
     """给 LLM 的上下文：JOIN 键、表关系、指标依赖的列、口径规则都不能少。"""
 
@@ -166,6 +266,9 @@ class PromptContextTest(unittest.TestCase):
         self.assertIn("表关系", prompt)
         self.assertIn("o.status = 'paid'", prompt)
         self.assertIn("LIMIT 10", prompt)
+        self.assertIn("SELECT DISTINCT", prompt)
+        self.assertIn("ROW_NUMBER", prompt)
+        self.assertIn("有哪些", prompt)
         self.assertIn("各地区的销量", prompt)
 
 
@@ -191,6 +294,23 @@ class ValidatorTest(unittest.TestCase):
     def test_accept_plain_select(self) -> None:
         ok, _ = validate("SELECT order_id FROM orders LIMIT 5", self.catalog)
         self.assertTrue(ok)
+
+    def test_accept_cte_select(self) -> None:
+        # 复杂问题（分组 Top-N / 多步聚合）会用 WITH；CTE 名不能当成未知表
+        sql = (
+            "WITH ranked AS ("
+            "SELECT p.category, SUM(i.quantity) AS units "
+            "FROM orders o JOIN order_items i ON i.order_id = o.order_id "
+            "JOIN products p ON p.product_id = i.product_id "
+            "GROUP BY p.category"
+            ") SELECT category FROM ranked WHERE units > 0"
+        )
+        ok, msg = validate(sql, self.catalog)
+        self.assertTrue(ok, msg)
+
+    def test_reject_cte_with_write(self) -> None:
+        ok, _ = validate("WITH x AS (SELECT 1) DELETE FROM orders", self.catalog)
+        self.assertFalse(ok)
 
 
 class ExecutionTest(unittest.TestCase):

@@ -9,57 +9,193 @@
 <body>
   <header class="topbar">
     <div class="brand">
-      <span class="dot"></span>
-      <strong>NL2SQL Schema RAG</strong>
-      <span class="sub">自然语言 → 检索 schema → 生成 SQL → 校验 → 执行</span>
+      <div class="logo" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+             stroke-linecap="round" stroke-linejoin="round">
+          <ellipse cx="12" cy="5.5" rx="7.5" ry="2.8" />
+          <path d="M4.5 5.5v5.2c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8V5.5" />
+          <path d="M4.5 10.7v5.2c0 1.5 3.4 2.8 7.5 2.8 1.3 0 2.5-.1 3.5-.4" />
+          <path d="m16.5 17.5 1.5 1.5 3.2-3.2" />
+        </svg>
+      </div>
+      <div class="brand-copy">
+        <div class="brand-line">
+          <strong class="brand-name">NL2SQL</strong>
+          <span class="brand-tag">Schema RAG</span>
+        </div>
+        <div class="brand-sub">自然语言 → 检索 schema → 模型写 SQL → 校验 → 执行</div>
+      </div>
     </div>
-    <div class="right">
-      <select id="role" class="role-select" title="角色（决定可见列）">
-        <option value="analyst">分析师</option>
-        <option value="viewer">只读访客</option>
-      </select>
-      <button id="btn-new" class="ghost">新会话</button>
-      <button id="btn-demo" class="ghost" title="固定 SQL 演示：两条 SQL 写死，不调模型；只演示「写错列名 → 带报错改对」的时间线">演示修复</button>
-      <button id="btn-eval" class="ghost" title="走离线规则基线（CI 用，约 2ms）；模型评测用 python -m app.evals --engine llm">跑评测</button>
-      <a id="link-schema" class="ghost" href="/api/schema">看 schema</a>
+
+    <div class="top-actions">
+      <label class="role-field">
+        <span class="role-label">角色</span>
+        <select id="role" class="role-select" title="角色（决定可见列）">
+          <option value="analyst">分析师</option>
+          <option value="viewer">只读访客</option>
+        </select>
+      </label>
+      <div class="action-group">
+        <button id="btn-new" class="btn ghost" title="清空会话上下文">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 5v14M5 12h14" />
+          </svg>
+          新会话
+        </button>
+        <button id="btn-demo" class="btn ghost"
+                title="固定 SQL 演示：两条 SQL 写死，不调模型；只演示「写错列名 → 带报错改对」的时间线">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.3 2.3-2-2z" />
+          </svg>
+          演示修复
+        </button>
+        <button id="btn-eval" class="btn ghost"
+                title="只跑离线规则基线（CI 用，约 2ms），不在页面调模型；模型评测看右侧「上次模型评测」或用 python -m scripts.record_llm_eval">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M4 20V11M10 20V4M16 20v-6M22 20H2" />
+          </svg>
+          跑离线基线
+        </button>
+        <a id="link-schema" class="btn ghost" href="/api/schema" target="_blank" rel="noopener"
+           title="按当前角色查看裁剪后的 schema">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <ellipse cx="12" cy="5.5" rx="7.5" ry="2.8" />
+            <path d="M4.5 5.5v6c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8v-6" />
+            <path d="M4.5 11.5v6c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8v-6" />
+          </svg>
+          看 schema
+        </a>
+      </div>
     </div>
   </header>
 
-  <main class="layout">
-    <section class="panel input-panel">
-      <label for="q">你的问题</label>
-      <textarea id="q" rows="3" placeholder="例如：上个月各地区的 GMV 是多少？"></textarea>
-      <div class="samples"></div>
-      <button id="btn-run" class="primary">生成并执行</button>
-      <p class="hint">主路径走大模型（配置 LLM_API_KEY，约 0.8s/条）；没 key 或请求失败时降级到规则 fallback（约 2ms）。每次结果都会标出这次是谁生成的。</p>
-
-      <div class="panel-block">
-        <h3>命中的 schema</h3>
-        <div id="ctx-metrics" class="tag-row"><span class="muted">指标 —</span></div>
-        <div id="ctx-tables" class="tag-row"><span class="muted">表 —</span></div>
-        <div id="ctx-columns" class="tag-row wrap"><span class="muted">列 —</span></div>
+  <main class="page">
+    <section class="page-head">
+      <div class="page-title">
+        <h1>用一句话，查清<span class="accent">业务数据</span></h1>
+        <p>把问题缩到指标 / 表 / 列，让模型在裁剪后的 schema 里写 SQL；代码负责校验、执行与失败重试。</p>
+      </div>
+      <div class="page-badges">
+        <span class="pill pill-accent"><i class="dot"></i>LLM 主线</span>
+        <span class="pill">规则 fallback</span>
+        <span class="pill">只读 · 限行 · 超时</span>
       </div>
     </section>
 
-    <section class="panel result-panel">
-      <div class="result-head">
-        <h3>结果</h3>
-        <span id="meta" class="meta"></span>
-      </div>
-      <div id="state" class="state"></div>
-      <div id="rewrite" class="rewrite"></div>
-      <div id="answer" class="answer"></div>
-      <div id="attempts" class="attempts"></div>
-      <div id="table-wrap" class="table-wrap"></div>
-
-      <div class="panel-block">
-        <div class="sql-head">
-          <h3>生成的 SQL</h3>
-          <button id="btn-copy" class="ghost small">复制</button>
+    <div class="workspace">
+      <section class="panel ask-panel">
+        <div class="panel-head">
+          <div class="panel-title">
+            <span class="panel-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+                   stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 14.5a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+              </svg>
+            </span>
+            <h2>提问</h2>
+          </div>
+          <span class="panel-note">Ctrl / ⌘ + Enter</span>
         </div>
-        <pre id="sql" class="sql">—</pre>
-      </div>
-    </section>
+
+        <label for="q" class="field-label">你的问题</label>
+        <textarea id="q" rows="4" placeholder="例如：上个月各地区的 GMV 是多少？"></textarea>
+
+        <div class="samples-head"><span>试试这些</span><span class="samples-note">点击直接运行</span></div>
+        <div class="samples"></div>
+
+        <button id="btn-run" class="btn primary">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M5 12h14" />
+            <path d="m13 6 6 6-6 6" />
+          </svg>
+          生成并执行
+        </button>
+        <p class="hint">主路径走大模型（配置 LLM_API_KEY，约 0.8s/条）；没 key 或请求失败时降级到规则 fallback（约 2ms）。每次结果都会标出来源。</p>
+      </section>
+
+      <section class="panel result-panel">
+        <div class="panel-head">
+          <div class="panel-title">
+            <span class="panel-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+                   stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="4" width="18" height="16" rx="2" />
+                <path d="M3 10h18M9 10v10" />
+              </svg>
+            </span>
+            <h2>查询结果</h2>
+          </div>
+          <div class="result-status">
+            <span id="engine-badge" class="engine-badge" hidden></span>
+            <span id="meta" class="meta"></span>
+          </div>
+        </div>
+
+        <div id="state" class="state"></div>
+
+        <div id="empty-state" class="empty-state">
+          <div class="empty-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                 stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 19V9M10 19V5M16 19v-7" />
+              <path d="M3 19h18" />
+              <circle cx="18.5" cy="5.5" r="2.5" />
+            </svg>
+          </div>
+          <strong>结果会显示在这里</strong>
+          <p>点左侧的示例，或直接输入问题。会返回 SQL、执行结果、命中的 schema，以及失败时的重试过程。</p>
+        </div>
+
+        <div id="rewrite" class="rewrite"></div>
+        <div id="answer" class="answer"></div>
+        <div id="attempts" class="attempts"></div>
+        <div id="table-wrap" class="table-wrap"></div>
+
+        <div id="sql-block" class="panel-block sql-block">
+          <div class="sql-head">
+            <div class="block-head"><h3>生成的 SQL</h3></div>
+            <button id="btn-copy" class="btn small">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+                   stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="9" y="9" width="11" height="11" rx="2" />
+                <path d="M5 15V5a2 2 0 0 1 2-2h10" />
+              </svg>
+              复制
+            </button>
+          </div>
+          <pre id="sql" class="sql">—</pre>
+        </div>
+
+        <div class="result-foot">
+          <span class="foot-label">执行保障</span>
+          <span class="guard">只读连接</span>
+          <span class="guard">表白名单</span>
+          <span class="guard">限行 200</span>
+          <span class="guard">5 秒超时</span>
+          <span class="guard">服务端掩码</span>
+        </div>
+      </section>
+
+      <aside class="rail">
+        <section class="panel rail-card">
+          <div class="block-head"><h3>命中的 schema</h3><span class="muted">检索后更新</span></div>
+          <div id="ctx-metrics" class="tag-row"><span class="tag-label">指标</span><span class="muted">—</span></div>
+          <div id="ctx-tables" class="tag-row"><span class="tag-label">表</span><span class="muted">—</span></div>
+          <div id="ctx-columns" class="tag-row wrap"><span class="tag-label">列</span><span class="muted">—</span></div>
+        </section>
+
+        <section id="llm-last-card" class="panel rail-card" hidden>
+          <div class="block-head"><h3>上次模型评测</h3><span class="muted">只读快照</span></div>
+          <p id="llm-last" class="llm-last" hidden></p>
+          <p class="rail-note">由 CLI 生成，页面不现场调模型</p>
+        </section>
+      </aside>
+    </div>
   </main>
 
   <script src="/app.js"></script>

@@ -8,7 +8,8 @@
 3. 整句都是客套话 → chat（剥掉寒暄后不剩内容才算，"好的，各地区的GMV" 仍是 ask）
 4. 问表结构 / 字段 → out_of_scope
 5. 与数据无关 → out_of_scope
-6. 有数据词但**抽不到指标** → clarify（AC-2.3）
+6. 有数据词但**抽不到指标** → clarify（AC-2.3）；
+   例外：识别到维度且是"有哪些 / 列出"的清单问法，不需要指标，交生成器写 SELECT DISTINCT
 7. 其余 → ask
 
 槽位由调用方传进来（M3 在会话继承算完槽位之后才调这里），**classify 不自己抽取**：
@@ -57,6 +58,10 @@ DATA_HINTS = re.compile(
     r"(GMV|gmv|成交|销售|营收|订单|客户|商品|品类|品牌|地区|区域|退款|客单价|销量|件数|金额|业绩|经营|流水|收入|毛利|"
     r"上个月|上月|本月|这个月|今年|去年|最近|每月|按月)"
 )
+
+# 只问"有哪些 / 列出"某个维度的取值，本身不需要指标（"华东地区有哪些商品类别"）。
+# 这类问题交给模型写 SELECT DISTINCT，而不是逼用户先补一个指标。
+LISTING_PATTERN = re.compile(r"(有哪些|有什么|哪些|列出|列一下|清单|分别有哪些|分别是什么|都有什么)")
 
 # 澄清时能给的维度，从 catalog 里带 is_dimension 的列翻译过来
 DIMENSION_LABELS = {
@@ -108,7 +113,9 @@ def _dimension_options(catalog: Catalog) -> str:
 
 def _clarify_options(question: str, catalog: Catalog, slots: dict[str, list[str]]) -> list[str]:
     options: list[str] = []
-    if not slots["dimension"] and not slots["filter"]:
+    # 有筛选（比如"华东的…"）但没维度时，也要给"按什么维度看"，
+    # 否则澄清项只剩指标/时间，用户会以为系统只会算指标。
+    if not slots["dimension"]:
         options.append(_dimension_options(catalog))
     options.append(_metric_options(catalog))
     if not slots["time"]:
@@ -166,7 +173,11 @@ def classify(
         return Route("out_of_scope", "没有识别到指标、表或维度", confidence=0.6)
 
     # 5) 有数据意图但抽不到指标：要澄清（AC-2.3）
+    #    例外：只问"有哪些 / 列出"某个维度——这类问题本来就不需要指标，
+    #    交给模型写 SELECT DISTINCT，而不是把用户挡在澄清这一步。
     if not slots["metric"]:
+        if slots["dimension"] and LISTING_PATTERN.search(q):
+            return Route("ask", "问的是维度清单，没有指标也生成 SQL")
         return Route("clarify", "没有识别出指标，需要澄清",
                      clarify_options=_clarify_options(q, catalog, slots))
 

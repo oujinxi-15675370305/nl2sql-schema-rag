@@ -25,7 +25,9 @@
 - 不做多数据源（只 SQLite 演示库 + 可替换的执行器接口）；
 - 不做图表看板、不做完整账号体系（权限用"角色 → 可见列"配置演示）；
 - 不套 Agent 框架（LangGraph 之类），卖点是确定性校验；
-- 不做模型训练/微调。
+- 不做模型训练/微调；
+- 不在页面里跑模型评测（成本、延迟、非确定性），也不把公开 benchmark（BIRD/Spider）接进 CI；
+  公开集要做就独立 `benchmarks/`、手动跑（见 README）。
 
 ## 3. 模块与验收标准
 
@@ -45,6 +47,8 @@
 - **AC-2.1**：五类意图——`ask`（问数）/ `chat`（闲聊）/ `clarify`（缺信息）/ `out_of_scope`（超纲）/ `unsafe`（越权或写操作）。
 - **AC-2.2**：只有 `ask` 会生成 SQL；其余四类返回固定话术，`sql` 为空。
 - **AC-2.3**：缺信息（如"看下业绩"没说指标/时间）返回 `clarify`，并给出候选澄清项。判定用 `extract_keywords` 的 metric 槽位，不另抄一份指标词表。
+  例外：只问「有哪些 / 列出」某个维度、且已识别到维度时（"华东地区有哪些商品类别"），问题本身不需要指标，
+  按 `ask` 交生成器写 `SELECT DISTINCT`，不返回 clarify。
 - **AC-2.4**：含写操作词（删除/更新/插入/导出到文件）判为 `unsafe`，不生成 SQL。只拦祈使用法："被删除的订单有多少"这类定语不算写操作。
 - **AC-2.5**：路由是规则优先（可解释）；关闭 LLM 时路由仍可用。低置信度交给 LLM 兜底**不在 M2 范围**（`Route.confidence` 留了接口，没用）。
 
@@ -90,6 +94,10 @@
   `hard_total / hard_match / hard_rate / hard_engine_counts`，**不并入**基础单轮与多轮；
   期望 SQL 手写、必须过校验与执行，且用例不能被路由提前判成 clarify/unsafe（否则测不到生成）。
   该组只作"规则 vs 模型"的证据，**不作 CI 门槛**（CI 仍只跑 `--engine rule` 的基础集）。
+- **AC-5.7**：页面「跑离线基线」只跑 `engine=rule` 的基础集，不在页面现场调模型；模型成绩来自只读快照
+  `eval/llm_result.json`（由 `scripts/record_llm_eval.py` 生成：剥掉 `details`，静默回退或 hard 期望 SQL
+  报错时不落盘），`GET /api/eval/llm/last` 读它——有快照返回 `available=true` + 模型/日期/汇总，
+  缺失或损坏返回 `available=false`（页面隐藏）。接口、页面加载与测试都**不得触发模型调用**。
 
 ### M6 交付物：Docker + 截图 + GIF（P1）
 
@@ -143,7 +151,11 @@ POST /api/demo/repair
   # 只给页面「演示修复」和截图脚本用：不写会话（session_id 为空）、不参与评测
 GET /api/schema?role=analyst|viewer → 按角色裁剪后的表/列/指标
 GET /api/eval   → 评测摘要：total / ask_total / exec_rate / intent_rate / multi_turn_rate /
-                  failure_counts …（details 与 multi_turn_details 不下发）
+                  failure_counts …（details 与 multi_turn_details 不下发；engine=rule）
+GET /api/eval/llm/last → 最近一次模型评测的只读快照：
+                  { available, generated_at, model, engine, summary }
+                  # available=false 表示没有或损坏的 eval/llm_result.json，页面隐藏这一块
+                  # 只读文件，不调模型、不扫题库
 GET /api/audit  → { total, entries }：越权尝试（内存环形缓冲）
 GET /api/health → { ok, tables, metrics, roles }
 ```
@@ -169,13 +181,14 @@ GET /api/health → { ok, tables, metrics, roles }
 |---|---|---|
 | 基线（M0：检索/生成/校验/执行/评测/页面） | ✅ 已完成 | 20 条评测 100% |
 | M1 SQL 自我修复 | ✅ 已完成 | 9 条测试（含 error 清理 / engine / 超时回归）；`scripts/demo_repair.py` 可复现 |
-| M2 意图路由 | ✅ 已完成 | 13 条测试；槽位判澄清；非 ask 不生成 SQL，返回话术；前端已接 |
+| M2 意图路由 | ✅ 已完成 | 13 条测试；槽位判澄清；非 ask 不生成 SQL，返回话术；前端已接；2026-11-22 补：维度清单（有哪些X）不澄清，交模型写 `SELECT DISTINCT`，有筛选时澄清项也补维度 |
 | M1/M2 审核修复 | ✅ 已完成 | 2026-11-13 |
 | M3 多轮追问 | ✅ 已完成 | 35 条测试（AC-3.1~3.6，含标签覆盖/客户维度回环）；顺序 `session → 槽位继承 → classify → 生成`，classify 只收槽位；会话进程内、默认 5 轮 |
 | M4 权限与脱敏 | ✅ 已完成 | 29 条权限测试 + 7 条 HTTP 契约；顺序 `role → 裁剪 catalog → 槽位 → classify → 检索/生成`；列白名单（含禁 `*`）、裸投影掩码 + 值兜底、审计；2026-11-16 审核补了两条绕过路径 |
-| M5 评测与 CI | ✅ 已完成 | 57 条单轮（50 问数 + 7 意图/越权；6 指标 × 6 维度、31/36 组合、6 类时间）+ 7 会话 21 轮多轮评测；失败分类（routed/permission/validate/field/syntax/timeout/retrieval/result/intent）汇总；CI 三门槛 90% + artifact；扩容时修了退款率二次舍入；`--engine llm` 实测 deepseek-chat 单轮 50/50、多轮 21/21、回退 0（2026-11-20）；规则覆盖外 10 条（AC-5.6）规则 0/10、模型 7–8/10（4 次采样） |
-| M6 Docker + 截图/GIF | ✅ 已完成 | `docker compose up --build` 起 8000（容器内 seed、healthcheck、空 volume 补 seed）；`scripts/shots.py` 固定脚本产出 3 图 + 1 GIF；离线演示修复走 `/api/demo/repair`（脚本化生成器，不写会话、不参与评测）；166 个单测 |
+| M5 评测与 CI | ✅ 已完成 | 57 条单轮（50 问数 + 7 意图/越权；6 指标 × 6 维度、31/36 组合、6 类时间）+ 7 会话 21 轮多轮评测；失败分类（routed/permission/validate/field/syntax/timeout/retrieval/result/intent）汇总；CI 三门槛 90% + artifact；扩容时修了退款率二次舍入；`--engine llm` 实测 deepseek-chat 单轮 50/50、多轮 21/21、回退 0（2026-11-20）；规则覆盖外 10 条（AC-5.6）规则 0/10、模型 6–8/10（多次采样，最近快照 6–8/10） |
+| M6 Docker + 截图/GIF | ✅ 已完成 | `docker compose up --build` 起 8000（容器内 seed、healthcheck、空 volume 补 seed）；`scripts/shots.py` 固定脚本产出 3 图 + 1 GIF；离线演示修复走 `/api/demo/repair`（脚本化生成器，不写会话、不参与评测）；175 个单测 |
 | LLM 主线化 / 规则 fallback（2026-11-20） | ✅ 已完成 | 规则 SQL 移到 `app/fallback.py`（`OfflineFallback`，离线降级 + CI 基线），`agent.py` 只留 LLM/校验/执行/重试；新增 `eval/hard_cases.json` 10 条与 `--hard` runner（单独统计、不进 CI）；README/SPEC/decisions 改成模型主线；166 测试全绿，CI 仍只跑 `--engine rule` |
+| 页面离线基线 / 模型快照（2026-11-21） | ✅ 已完成 | 按钮改「跑离线基线」；`scripts/record_llm_eval.py` 生成 `eval/llm_result.json`（只读快照），`GET /api/eval/llm/last` 有则显示「上次模型评测」、无/损坏则隐藏；接口与测试均不调模型；BIRD/Spider/DuSQL 仅方案评估、不接；175 单测 |
 
 ## 8. 开发约定
 

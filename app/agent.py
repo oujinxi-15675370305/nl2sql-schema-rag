@@ -44,8 +44,10 @@ def _required_tables(catalog: Catalog, slots: dict) -> list[str]:
                 table = ref.split(".", 1)[0]
                 if table not in required:
                     required.append(table)
-    # 所有指标都要么过滤 orders.status、要么按订单去重/关联，orders 基本是必需表
-    if slots.get("metric"):
+    # 所有指标都要么过滤 orders.status、要么按订单去重/关联，orders 基本是必需表。
+    # 没有指标的维度清单（"华东有哪些商品类别"）也要靠 orders 才能从地区连到商品，
+    # 所以只要问题有槽位就把 orders 带上。
+    if any(slots.get(key) for key in ("metric", "dimension", "filter", "time")):
         required.append("orders")
     dims = set(slots.get("dimension", []))
     filters = " ".join(slots.get("filter", []))
@@ -89,6 +91,40 @@ def build_context(
     return ctx, slots
 
 
+# 筛选槽位对应的输出列：只换筛选条件时，这些列不该出现在 SELECT 里
+FILTER_COLUMNS = {"region": "region_name", "category": "category"}
+
+
+def _shape_feedback(sql: str, slots: dict) -> str:
+    """生成后的语义形状检查：筛选条件必须保留；只换筛选时不要 SELECT 筛选列。
+
+    这不是替代 `validate`，而是把 prompt 里已经写明的约定变成可执行的反馈：
+    返回非空时按一次 validate 失败处理，把话术作为 feedback 让模型重写。
+    只对 `filter` 槽位生效（region/category），无筛选的问题不受影响。
+    """
+    filters = slots.get("filter", [])
+    if not filters:
+        return ""
+    values = [item.split(":", 1)[1] for item in filters if ":" in item]
+    missing = [value for value in values if value not in sql]
+    if missing:
+        return f"上文筛选条件必须保留：{', '.join(missing)}。请把筛选加回 WHERE 再生成。"
+    if len(values) > 1:
+        # "华东和华南对比"这类多值筛选，按筛选列分组是合理的，不要误判成"多选了筛选列"
+        return ""
+    if slots.get("dimension"):
+        return ""
+    low = sql.lower()
+    # 只看最后一个 SELECT 的投影，避免把 CTE 内部的选择误当成最终输出
+    select_part = re.split(r"\bfrom\b", low.rsplit("select", 1)[-1], maxsplit=1)[0]
+    for item in filters:
+        column = FILTER_COLUMNS.get(item.split(":", 1)[0])
+        if column and column in select_part:
+            return (f"问题只是换筛选条件，没有要求按筛选列分组；"
+                    f"请从 SELECT 里去掉 {column}，只保留指标列。")
+    return ""
+
+
 # ---------- SQL 生成（LLM 主线；规则在 app/fallback.py） ----------
 def llm_sql(
     question: str, ctx: SchemaContext, catalog: Catalog, feedback: str | None = None
@@ -103,7 +139,7 @@ def llm_sql(
         "你是数据仓库的 SQL 生成器。只能使用下面给出的表和列，禁止编造字段或 JOIN 条件。\n"
         f"可用 schema：\n{ctx.ddl(catalog)}\n\n"
         "口径与格式（必须遵守）：\n"
-        "- 只输出一条 SELECT 语句，不要解释，不要 markdown。\n"
+        "- 只输出一条 SELECT 语句（复杂问题可以用 WITH ... SELECT 的 CTE），不要解释，不要 markdown。\n"
         "- 指标口径以 schema 里给出的 metric SQL 为准。\n"
         "- GMV/成交额/销售额一律用 SUM(o.pay_amount)，不要用 order_items.item_amount 或 quantity*unit_price。\n"
         "- 成交额/订单数/客单价/销量/客户数只统计 o.status = 'paid'；退款率不要加这个过滤。\n"
@@ -115,14 +151,26 @@ def llm_sql(
         "  最近30天 >= date('now','-30 day')；\n"
         "  只有指定月份（YYYY-MM）才用 substr(o.order_date,1,7) = 'YYYY-MM'。\n"
         "- 只 SELECT 问题要求的维度列和指标列，不要额外列。\n"
+        "- 如果问题只问「有哪些 / 列出」某个维度、没有指标：用 SELECT DISTINCT 只选该维度列，"
+        "不要臆造指标，也不要 GROUP BY。\n"
+        "- 有指标的问题必须 SELECT 指标列（可以再带分组维度），不要只返回维度取值。\n"
+        "- 问题里的词在 schema 中没有对应表时（例如「门店」），不要编造表；用已有的地区 / 客户维度近似。\n"
         "- 如果问题只是换筛选条件（例如「换成华南」），不要额外 SELECT 被筛选的列，除非问题要求按它分组。\n"
-        "- 问题里有 排名/Top/最多/前N 时：ORDER BY 指标 DESC LIMIT 10；否则不要 ORDER BY、不要 LIMIT。\n"
+        "- 问题里有 排名/Top/最多/前N 时：ORDER BY 指标 DESC LIMIT 10；"
+        "但如果要求「每个分组内」的 Top-N（例如每个品类销售额前两名商品），"
+        "用 WITH 分两步，再用 ROW_NUMBER() OVER (PARTITION BY 分组列 ORDER BY 指标 DESC) "
+        "筛 rn <= N，不要只 ORDER BY 返回全部分组，也不要用全局 LIMIT 10。"
+        "否则不要 ORDER BY、不要 LIMIT。\n"
         "- JOIN 只能使用 schema 里列出的表关系。\n\n"
         "示例：\n"
         "问题：各地区的GMV\n"
         "SQL：SELECT r.region_name, ROUND(SUM(o.pay_amount), 2) AS gmv "
         "FROM orders o JOIN regions r ON r.region_id = o.region_id "
         "WHERE o.status = 'paid' GROUP BY r.region_name\n\n"
+        "问题：华东地区有哪些商品类别\n"
+        "SQL：SELECT DISTINCT p.category FROM orders o JOIN order_items i ON i.order_id = o.order_id "
+        "JOIN products p ON p.product_id = i.product_id JOIN regions r ON r.region_id = o.region_id "
+        "WHERE o.status = 'paid' AND r.region_name = '华东'\n\n"
         f"问题：{question}\n"
     )
     if feedback:
@@ -198,11 +246,16 @@ def validate(
 
     `masked` 是当前角色"可见但要掩码"的列名：只允许裸列投影。改名、函数包裹、
     拼接都会让结果列名/列值绕过按列名的掩码，所以在这里直接拒。
+
+    允许 `WITH ... SELECT`：复杂问题（分组 Top-N、多步聚合）需要 CTE + 窗口函数，
+    只放行只读的 WITH；DML 关键字仍然在 FORBIDDEN 里被拦。
     """
     s = sql.strip().rstrip(";")
     low = s.lower()
-    if not low.startswith("select"):
-        return False, "只允许 SELECT"
+    if not (low.startswith("select") or low.startswith("with")):
+        return False, "只允许 SELECT 或 WITH ... SELECT"
+    if low.startswith("with") and "select" not in low:
+        return False, "只允许 SELECT 或 WITH ... SELECT"
     if ";" in s:
         return False, "只允许单条语句"
     for word in FORBIDDEN:
@@ -239,7 +292,10 @@ def validate(
             return False, "敏感字段不能参与函数或表达式"
 
     known = {t.name for t in catalog.tables}
-    used = set(re.findall(r"\b(?:from|join)\s+([a-zA-Z_][a-zA-Z0-9_]*)", low))
+    # WITH 里的 CTE 名字不是物理表：先摘出来，否则 `FROM ranked` 会被当成未知表
+    cte_names = set(re.findall(
+        r"(?:\bwith\b|,)\s*([a-z_][a-z0-9_]*)\s*(?:\([^)]*\))?\s+as\s*\(", low))
+    used = set(re.findall(r"\b(?:from|join)\s+([a-zA-Z_][a-zA-Z0-9_]*)", low)) - cte_names
     unknown = used - known
     if unknown:
         return False, f"未知的表：{', '.join(sorted(unknown))}"
@@ -361,6 +417,11 @@ def ask(
         plan.sql = sql
 
         ok, message = validate(raw_sql, catalog, denied=hidden, masked=masked_names)  # AC-1.4 / AC-4.1 / AC-4.3
+        if ok:
+            # 语义形状检查：筛选条件丢了 / 只换筛选却多选了筛选列 → 当 validate 失败，带话术重写
+            shape_error = _shape_feedback(raw_sql, keywords)
+            if shape_error:
+                ok, message = False, shape_error
         timed_out = False
         if ok:
             attempt_log["stage"] = "execute"  # 校验放行后，失败只可能发生在执行

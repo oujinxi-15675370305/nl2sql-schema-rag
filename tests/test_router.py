@@ -58,6 +58,18 @@ class RouterClassifyTest(unittest.TestCase):
                 self.assertEqual(r.intent, "clarify")
                 self.assertGreaterEqual(len(r.clarify_options), 2)
 
+    def test_dimension_listing_without_metric_routes_to_ask(self) -> None:
+        # 只问"有哪些 / 列出"维度值时，问题本身不需要指标；不能让用户先补一个指标
+        for q in ("华东地区有哪些商品类别", "有哪些品牌", "每个地区有哪些商品"):
+            with self.subTest(q=q):
+                self.assertEqual(route(q, self.catalog).intent, "ask")
+
+    def test_clarify_with_filter_still_offers_dimension(self) -> None:
+        # 有筛选（华东）但没维度时，也要给"按什么维度看"，不能只剩指标/时间
+        r = route("华东的业绩", self.catalog)
+        self.assertEqual(r.intent, "clarify")
+        self.assertTrue(any("维度" in option for option in r.clarify_options), r.clarify_options)
+
     def test_customer_questions_route_to_ask(self) -> None:
         # M4 前置：客户数成为正式指标，客户相关问题不再一律澄清
         for q in ("有多少客户", "客户数量", "各地区的客户数", "每个客户的GMV"):
