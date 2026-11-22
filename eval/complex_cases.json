@@ -1,0 +1,96 @@
+{
+  "note": "复杂问法（L2 单条复杂 SQL / L3 多步分析）单独一组：expected_sql 全部手写并按现有指标口径可执行，不复制生成器输出；不并入基础 50 条、多轮和 hard，也不作 CI 门槛。expected_unsupported 的题（为什么/归因）当前单条 SQL 答不了，只记录系统实际响应，不算通过也不算 SQL 失败。口径提醒：gmv 按 catalog 定义为 SUM(orders.pay_amount)（整单金额）；#1/#6/#9/#10/#12 按品类/商品/品牌拆分时沿用基础集写法（join order_items 后 SUM(o.pay_amount)），整单金额会按明细行重复计入，因此这些分组 gmv 不可跨组相加，也不等于可加的分摊销售额；需要可加口径时应另加明细金额指标（SUM(order_items.item_amount)），不能直接把 gmv 换掉。",
+  "cases": [
+    {
+      "id": 1,
+      "question": "华东销售额最高的三个品类，每个品类再列出销售额前两名商品",
+      "category": "group_top_n",
+      "expected_sql": "WITH top_cat AS (SELECT p.category, SUM(o.pay_amount) AS gmv FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' AND r.region_name = '华东' GROUP BY p.category ORDER BY gmv DESC LIMIT 3), ranked AS (SELECT p.category, p.product_name, SUM(o.pay_amount) AS gmv, ROW_NUMBER() OVER (PARTITION BY p.category ORDER BY SUM(o.pay_amount) DESC) AS rn FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id JOIN regions r ON r.region_id = o.region_id JOIN top_cat c ON c.category = p.category WHERE o.status = 'paid' AND r.region_name = '华东' GROUP BY p.category, p.product_name) SELECT category, product_name, ROUND(gmv, 2) AS gmv FROM ranked WHERE rn <= 2 ORDER BY category, gmv DESC",
+      "note": "两层 Top-N：先取华东品类 Top-3，再在每个品类内用 ROW_NUMBER 取商品 Top-2；CTE + 窗口函数，不能退化成全局 LIMIT 10"
+    },
+    {
+      "id": 2,
+      "question": "华东和华南的GMV、退款率对比",
+      "category": "multi_metric",
+      "expected_sql": "SELECT r.region_name, ROUND(SUM(CASE WHEN o.status = 'paid' THEN o.pay_amount ELSE 0 END), 2) AS gmv, ROUND(SUM(CASE WHEN o.status = 'refunded' THEN 1 ELSE 0 END) * 1.0 / COUNT(DISTINCT o.order_id), 4) AS refund_rate FROM orders o JOIN regions r ON r.region_id = o.region_id WHERE r.region_name IN ('华东', '华南') GROUP BY r.region_name ORDER BY r.region_name",
+      "note": "多指标同表对比：GMV 只算 paid，退款率按全部订单当前状态算（与 catalog 的 refund_rate 口径一致），一个 GROUP BY 出两列"
+    },
+    {
+      "id": 3,
+      "question": "今年各季度的GMV和订单数（季度写成 2026-Q1 这种格式）",
+      "category": "quarter",
+      "expected_sql": "SELECT substr(o.order_date, 1, 4) || '-Q' || ((CAST(substr(o.order_date, 6, 2) AS INTEGER) + 2) / 3) AS quarter, ROUND(SUM(o.pay_amount), 2) AS gmv, COUNT(DISTINCT o.order_id) AS order_count FROM orders o WHERE o.status = 'paid' AND o.order_date >= date('now', 'start of year') GROUP BY quarter ORDER BY quarter",
+      "note": "自然季度要从 order_date 推导（月份 +2 整除 3），规则 fallback 没有季度维度；同时带两个指标"
+    },
+    {
+      "id": 4,
+      "question": "华东各品类销量占华东总销量比例",
+      "category": "ratio",
+      "expected_sql": "SELECT p.category, ROUND(SUM(i.quantity) * 1.0 / SUM(SUM(i.quantity)) OVER (), 4) AS share FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' AND r.region_name = '华东' GROUP BY p.category ORDER BY share DESC",
+      "note": "占比用窗口 SUM(SUM(...)) OVER () 算分母；这里用销量而不是销售额——order 级 pay_amount 连明细会按商品重复计入，销售额占比不是可加口径，销量可加"
+    },
+    {
+      "id": 5,
+      "question": "各地区的复购客户数（下过至少两单的客户）",
+      "category": "repurchase",
+      "expected_sql": "WITH rep AS (SELECT o.customer_id FROM orders o WHERE o.status = 'paid' GROUP BY o.customer_id HAVING COUNT(DISTINCT o.order_id) >= 2) SELECT r.region_name, COUNT(*) AS customers FROM rep JOIN customers c ON c.customer_id = rep.customer_id JOIN regions r ON r.region_id = c.region_id GROUP BY r.region_name ORDER BY r.region_name",
+      "note": "先按客户聚合 HAVING >=2 单（复购），再按地区计数；规则只会数去重客户，没有两步聚合"
+    },
+    {
+      "id": 6,
+      "question": "各地区各品类的GMV",
+      "category": "multi_dim",
+      "expected_sql": "SELECT r.region_name, p.category, ROUND(SUM(o.pay_amount), 2) AS gmv FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' GROUP BY r.region_name, p.category ORDER BY r.region_name, p.category",
+      "note": "两个维度 + 指标，4 地区 × 4 品类 = 16 行；规则 fallback 只有单维度"
+    },
+    {
+      "id": 7,
+      "question": "为什么上个月GMV下降了？",
+      "category": "unsupported_why",
+      "expected_unsupported": true,
+      "note": "归因类问题：单条 SQL 只能取数，不能解释原因。当前系统可能只返回上个月 GMV 一条 SQL；如实记录为局限，不写 expected_sql、不算通过也不硬编分数"
+    },
+    {
+      "id": 8,
+      "question": "今年每个月的GMV和环比（(当月-前一个月)/前一个月，保留4位小数）",
+      "category": "window",
+      "expected_sql": "WITH monthly AS (SELECT substr(o.order_date, 1, 7) AS month, SUM(o.pay_amount) AS gmv FROM orders o WHERE o.status = 'paid' AND o.order_date >= date('now', 'start of year') GROUP BY month) SELECT month, ROUND(gmv, 2) AS gmv, ROUND((gmv - LAG(gmv) OVER (ORDER BY month)) * 1.0 / LAG(gmv) OVER (ORDER BY month), 4) AS mom FROM monthly ORDER BY month",
+      "note": "CTE 先算月度 GMV，再用 LAG 算环比；第一个月没有上月，mom 为 NULL。问题里写清公式，避免小数/百分比口径歧义"
+    },
+    {
+      "id": 9,
+      "question": "每个品牌销售额前两名商品",
+      "category": "group_top_n",
+      "expected_sql": "WITH ranked AS (SELECT p.brand, p.product_name, SUM(o.pay_amount) AS gmv, ROW_NUMBER() OVER (PARTITION BY p.brand ORDER BY SUM(o.pay_amount) DESC) AS rn FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id WHERE o.status = 'paid' GROUP BY p.brand, p.product_name) SELECT brand, product_name, ROUND(gmv, 2) AS gmv FROM ranked WHERE rn <= 2 ORDER BY brand, gmv DESC",
+      "note": "单层分组 Top-N：PARTITION BY 品牌，不能用全局 LIMIT 2；3 个品牌 × 2 = 6 行"
+    },
+    {
+      "id": 10,
+      "question": "各品牌的GMV和订单数",
+      "category": "multi_metric",
+      "expected_sql": "SELECT p.brand, ROUND(SUM(o.pay_amount), 2) AS gmv, COUNT(DISTINCT o.order_id) AS order_count FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id WHERE o.status = 'paid' GROUP BY p.brand ORDER BY p.brand",
+      "note": "多指标 + 维度：GMV 和订单数一起出；订单数必须 COUNT(DISTINCT order_id)，不能在明细行上直接 COUNT"
+    },
+    {
+      "id": 11,
+      "question": "各地区GMV占全国比例",
+      "category": "ratio",
+      "expected_sql": "SELECT r.region_name, ROUND(SUM(o.pay_amount) * 1.0 / SUM(SUM(o.pay_amount)) OVER (), 4) AS share FROM orders o JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' GROUP BY r.region_name ORDER BY share DESC",
+      "note": "窗口占比：分母是全国总额，四个地区 share 相加为 1"
+    },
+    {
+      "id": 12,
+      "question": "上个月各地区各品类的GMV",
+      "category": "multi_dim",
+      "expected_sql": "SELECT r.region_name, p.category, ROUND(SUM(o.pay_amount), 2) AS gmv FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' AND o.order_date >= date('now', 'start of month', '-1 month') AND o.order_date < date('now', 'start of month') GROUP BY r.region_name, p.category ORDER BY r.region_name, p.category",
+      "note": "两个维度 + 时间过滤；上个月用 date('now','start of month','-1 month') 的半开区间，避免把本月算进来"
+    },
+    {
+      "id": 13,
+      "question": "GMV超过3万的客户按地区统计人数",
+      "category": "customer_cte",
+      "expected_sql": "WITH big AS (SELECT o.customer_id, SUM(o.pay_amount) AS gmv FROM orders o WHERE o.status = 'paid' GROUP BY o.customer_id HAVING SUM(o.pay_amount) > 30000) SELECT r.region_name, COUNT(*) AS customers FROM big JOIN customers c ON c.customer_id = big.customer_id JOIN regions r ON r.region_id = c.region_id GROUP BY r.region_name ORDER BY r.region_name",
+      "note": "客户粒度先聚合再 HAVING 筛，然后回连客户/地区做分布；单条 SQL 但要先想清粒度，规则拼不出来"
+    }
+  ]
+}

@@ -172,7 +172,7 @@ JOIN 拼接模板，评测默认 `--engine rule`，CI 也只跑规则。于是�
    `build_context` / `validate` / `execute` / `ask`。行为不变：159 条测试全绿、规则 50/50、多轮 21/21。
 2. 新增 `eval/hard_cases.json`：10 条规则拼不出来的问法（IN 多值、季度、HAVING、任意 Top-N、占比、
    复购、状态分布、滚动 7 天）。`--hard` 单独统计 `hard_*`，不并入基础 50 条。实测规则 **0/10**、
-   `deepseek-chat` **7–8/10**（当时连跑 4 次：8 / 7 / 8 / 8；后续 prompt 改动后最近 4 次为 6–8，见 README 与快照）。
+   `deepseek-chat` **7–8/10**（当时连跑 4 次：8 / 7 / 8 / 8；后续 prompt 改动后最近 4 次为 7–8，见 README 与快照）。
 3. README 改成"检索 → 模型写 SQL → 校验 → 执行 → 失败重试"在前，规则 fallback 单独一节写定位。
 
 为什么保留规则（而不是删掉）：
@@ -216,6 +216,45 @@ README（Top-1 被 prompt 的 LIMIT 10 带偏、上季度写成最近三个月�
 结果：同一句真实模型返回 `SELECT DISTINCT p.category ... WHERE r.region_name = '华东'`，4 个品类、
 `engine=llm`。规则 fallback 仍只覆盖指标模板，维度清单没 key 时会按指标兜底、可能答非所问，
 `engine=rule` 会标出来——这是 fallback 的已知边界，不是模型能力。
+
+## 2026-11-22 放行 CTE：模型能写复杂 SQL，先别让校验器卡死
+
+对比同类项目时做了一次实测："华东销售额最高的三个品类，每个品类再列出销售额前两名商品"。
+给模型加一条"分组 Top-N 用 `ROW_NUMBER()`"的提示后，它写出了带两层 CTE + 窗口函数的 SQL——
+但我们的 `validate` 只允许 `SELECT` 开头，直接以"只允许 SELECT"拒掉；即使放行，`FROM ranked`
+也会被表白名单当成未知表。
+
+这是典型的"规则把模型能出的结果卡死"：约束的本意是只读安全，不是禁止复杂查询。改法：
+
+- 允许 `SELECT` 或 `WITH ... SELECT`（CTE）；`WITH` 里必须出现 `SELECT`，DML 关键字仍在 `FORBIDDEN` 里拒；
+- 从 `from` / `join` 提取的表名里减去 `with` / `,` 后面的 CTE 名，避免把 CTE 当物理表；
+- prompt 增加分组 Top-N 规则：先取 Top-N 分组，再用 `ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...)` 筛 `rn <= N`，不要全局 LIMIT。
+
+验证：同一句真实模型返回 6 行（4 个品类里取销售额前 3 的品类 × 前 2 个商品），
+基础 50/50、多轮 21/21、hard 单次 8/10，180 个测试全绿。
+边界：这仍然是一条 SQL；"为什么下降/归因/多步对比"需要分析模式（多条 SQL + 综合结论），不在这次范围。
+
+## 2026-11-22 多轮筛选列：用 feedback 让模型改，不改期望
+
+加完 CTE / 分组 Top-N 规则后，多轮评测从 21/21 掉到 20/21：模型在"改成华南""那华南呢"里多 SELECT 了
+`region_name`，"那总共多少呢"还丢过筛选。不是模型不会写，而是它把筛选列当成"顺带展示"；而
+`multi_turn.json` 的期望是"只换筛选、不按筛选列分组"。
+
+没有改期望，也没有在代码里裁列，而是加了一层生成后的筛选形状检查（`_shape_feedback`）：
+
+- 上文筛选值必须出现在 SQL 里，丢了就让模型补回 WHERE；
+- 单值筛选且没有维度时，筛选列不能出现在最后一个 SELECT 的投影里；
+- 多值筛选（"华东和华南对比"）允许按筛选列分组，不能误判；
+- 违反时当作一次 `validate` 失败，把话术作为 `feedback` 让模型重写，不执行错误 SQL。
+
+结果：多轮 21/21（连跑 3 次）、基础 50/50、hard 7–8/10，180 个测试全绿。
+这条检查只约束"筛选语义"，不替模型写 SQL；模型仍然可以自己决定分组、指标和窗口函数。
+
+## 2026-11-22 complex 评测：分组 GMV 沿用整单口径，不可相加
+
+Step 1 的 13 条 complex 用例里有 5 条（#1/#6/#9/#10/#12）按品类/商品/品牌拆 GMV。`gmv` 的 catalog 定义是整单 `SUM(orders.pay_amount)`，而 `order_items` 一单多行，join 后 `SUM(o.pay_amount)` 会把整单金额按明细行重复计入：全国 paid GMV 3,362,703.71，按品类相加是 7,877,829.48（约 2.34×），品类排名和品牌 Top-2 商品都会变。
+
+没有把 expected 改成 `SUM(order_items.item_amount)`：prompt 和口径里已经写死“GMV 只能用 `pay_amount`”，直接换会让基础集与模型契约一起漂。complex 沿用基础集写法，保证与既有 50 条可比；代价是分组 GMV 不可跨组相加，也不能当“真实分摊销售额”用。要可加口径，应新增独立指标（如 `line_amount = SUM(order_items.item_amount)`）并重录基础集，那是单独任务。README 与 `eval/complex_cases.json` 都写了这条限制，Step 2 的分析结论不能把分组 GMV 当可加事实。
 
 ## 还没想清楚
 

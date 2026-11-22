@@ -1,5 +1,6 @@
 """M5 评测测试：用例覆盖、失败分类、多轮独立指标（AC-5.1 ~ AC-5.5）；
-规则覆盖外用例（eval/hard_cases.json）与 --hard runner 单独一组（AC-5.6）。"""
+规则覆盖外用例（eval/hard_cases.json）与 --hard runner 单独一组（AC-5.6）；
+复杂问法（eval/complex_cases.json）与 --complex runner 再单独一组。"""
 from __future__ import annotations
 
 import contextlib
@@ -11,7 +12,8 @@ from unittest import mock
 from app.agent import ScriptedGenerator, ask, execute, validate
 from app.catalog import load_catalog
 from app.domain import SchemaContext, SQLPlan
-from app.evals import CASES, HARD_CASES, LLM_RESULT, MULTI_CASES, classify_failure, main, run, run_hard
+from app.evals import (CASES, COMPLEX_CASES, HARD_CASES, LLM_RESULT, MULTI_CASES,
+                       classify_failure, main, run, run_complex, run_hard)
 from app.slots import DIMENSION_HINTS, extract_keywords
 
 TYPO_SQL = "SELECT COUNT(DISTINCT order_cnt) FROM orders WHERE status = 'paid' LIMIT 10"
@@ -314,6 +316,116 @@ class HardRunnerTest(unittest.TestCase):
         data = json.loads(buffer.getvalue())
         self.assertEqual(data["hard_total"], len(self.cases))
         self.assertIn("hard_rate", data)
+
+
+class ComplexCaseSetTest(unittest.TestCase):
+    """复杂问法集：10–15 条、期望 SQL 可执行、已支持题路由到 ask、归因题不硬编 expected。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.catalog = load_catalog()
+        cls.cases = json.loads(COMPLEX_CASES.read_text(encoding="utf-8"))["cases"]
+
+    def test_ten_to_fifteen_unique_cases(self) -> None:
+        self.assertGreaterEqual(len(self.cases), 10)
+        self.assertLessEqual(len(self.cases), 15)
+        ids = [case["id"] for case in self.cases]
+        self.assertEqual(len(ids), len(set(ids)), "id 不能复用")
+        for case in self.cases:
+            self.assertTrue(case["question"])
+            self.assertTrue(case["category"])
+            self.assertTrue(case["note"])
+
+    def test_categories_cover_complex_shapes(self) -> None:
+        categories = {case["category"] for case in self.cases}
+        required = {"group_top_n", "multi_metric", "quarter", "ratio",
+                    "repurchase", "multi_dim", "window", "unsupported_why"}
+        self.assertTrue(required <= categories, required - categories)
+
+    def test_unsupported_cases_have_no_expected_sql(self) -> None:
+        unsupported = [case for case in self.cases if case.get("expected_unsupported")]
+        self.assertGreaterEqual(len(unsupported), 1)
+        for case in unsupported:
+            self.assertNotIn("expected_sql", case, f"#{case['id']} 归因题不该硬编 expected_sql")
+        for case in self.cases:
+            if not case.get("expected_unsupported"):
+                self.assertIn("expected_sql", case, f"#{case['id']} 缺 expected_sql")
+
+    def test_expected_sql_is_valid_and_executable(self) -> None:
+        for case in self.cases:
+            if case.get("expected_unsupported"):
+                continue
+            ok, message = validate(case["expected_sql"], self.catalog)
+            self.assertTrue(ok, f"#{case['id']} 期望 SQL 不合法：{message}")
+            query = case["expected_sql"]
+            if "limit" not in query.lower():
+                query += " LIMIT 200"
+            try:
+                execute(query)
+            except Exception as exc:
+                self.fail(f"#{case['id']} 期望 SQL 执行失败：{exc}")
+
+    def test_supported_cases_route_to_ask(self) -> None:
+        # 被路由成澄清/超纲时模型根本不会写 SQL，这组就测不到复杂生成能力了
+        for case in self.cases:
+            if case.get("expected_unsupported"):
+                continue
+            plan = ask(case["question"], catalog=self.catalog, use_llm=False)
+            self.assertEqual(plan.intent, "ask", f"#{case['id']} 被路由成 {plan.intent}")
+
+
+class ComplexRunnerTest(unittest.TestCase):
+    """--complex 单独统计，不并入基础/多轮/hard；归因题只记录、不算通过。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.cases = json.loads(COMPLEX_CASES.read_text(encoding="utf-8"))["cases"]
+        cls.summary = run_complex(verbose=False)
+
+    def test_complex_summary_is_separate_from_base(self) -> None:
+        summary = self.summary
+        self.assertEqual(summary["complex_total"], len(self.cases))
+        self.assertEqual(summary["complex_supported"] + summary["complex_unsupported"],
+                         summary["complex_total"])
+        self.assertEqual(summary["complex_engine_counts"], {"rule": summary["complex_total"]})
+        self.assertEqual(summary["complex_fallbacks"], 0)
+        self.assertEqual(summary["complex_bad_expected"], 0)
+        self.assertEqual(len(summary["complex_details"]), summary["complex_total"])
+        # 不并进基础/多轮/hard：没有 total / exec_rate / multi_turn_rate 这些字段
+        self.assertNotIn("total", summary)
+        self.assertNotIn("exec_rate", summary)
+        self.assertNotIn("multi_turn_rate", summary)
+        self.assertNotIn("hard_rate", summary)
+
+    def test_unsupported_is_not_counted_as_pass_or_sql_failure(self) -> None:
+        summary = self.summary
+        unsupported = [d for d in summary["complex_details"] if d["expected_unsupported"]]
+        self.assertEqual(len(unsupported), summary["complex_unsupported"])
+        self.assertTrue(all(d["status"] == "unsupported" for d in unsupported))
+        self.assertTrue(all(not d["exec_match"] and d["failure"] == "" for d in unsupported))
+        # 只记录当前行为（是否仍给出了 SQL），不进 complex_match
+        self.assertLessEqual(summary["complex_unsupported_answered"], summary["complex_unsupported"])
+        self.assertEqual(summary["complex_match"],
+                         sum(1 for d in summary["complex_details"]
+                             if d["status"] == "pass"))
+
+    def test_complex_cli_runs_offline(self) -> None:
+        # load_env 会读仓库根的 .env（有 key）：测试里要挡掉，保证离线、不碰网络
+        buffer = io.StringIO()
+        with mock.patch("app.evals.load_env", return_value=0), \
+                contextlib.redirect_stdout(buffer):
+            code = main(["--complex", "--json"])
+        self.assertEqual(code, 0)
+        data = json.loads(buffer.getvalue())
+        self.assertEqual(data["complex_total"], len(self.cases))
+        self.assertIn("complex_rate", data)
+        self.assertNotIn("total", data)
+
+    def test_llm_mode_detects_silent_fallbacks(self) -> None:
+        with mock.patch("app.agent.llm_sql", return_value=None):
+            summary = run_complex(verbose=False, engine="llm")
+        self.assertEqual(summary["complex_engine_counts"], {"rule": summary["complex_total"]})
+        self.assertEqual(summary["complex_fallbacks"], summary["complex_total"])
 
 
 class LlmResultArtifactTest(unittest.TestCase):

@@ -5,6 +5,9 @@
   **不并进单轮**——混在一起历史数字就不可比了。
 - hard：`eval/hard_cases.json` 是规则覆盖外的问法（IN / 季度 / HAVING / 占比 / 复购…），
   单独算 `hard_rate`，用 `--hard` 跑；它不并入单轮、也不作 CI 门槛，是"规则 vs 模型"的证据。
+- complex：`eval/complex_cases.json` 是复杂单 SQL（CTE / 窗口 / 分组 Top-N / 多指标 / 占比 /
+  复购 / 多维度），单独算 `complex_rate`，用 `--complex` 跑；`expected_unsupported` 的归因题
+  只记录、不算通过。同样不并入其它组、不作 CI 门槛。
 - 失败：每条失败用例带 `failure` 分类，`summary.failure_counts` 汇总（AC-5.3）。
   分类靠 `ask()` 记下的 `failure_stage`（validate / execute / timeout），
   只有执行阶段的两个错误码（字段不存在 / 语法错）需要再看一眼错误信息。
@@ -28,6 +31,7 @@ ROOT = Path(__file__).resolve().parent.parent
 CASES = ROOT / "eval" / "cases.json"
 MULTI_CASES = ROOT / "eval" / "multi_turn.json"
 HARD_CASES = ROOT / "eval" / "hard_cases.json"
+COMPLEX_CASES = ROOT / "eval" / "complex_cases.json"
 # 最近一次模型评测的只读快照：由 scripts/record_llm_eval.py 跑完写入，
 # 页面只读它（GET /api/eval/llm/last），不会现场调模型。
 LLM_RESULT = ROOT / "eval" / "llm_result.json"
@@ -393,8 +397,109 @@ def run_hard(catalog: Catalog | None = None, verbose: bool = True, engine: str =
     }
 
 
+def run_complex(catalog: Catalog | None = None, verbose: bool = True, engine: str = "rule") -> dict:
+    """复杂问法（`eval/complex_cases.json`）：CTE/窗口、分组 Top-N、多指标、占比、复购、多维度。
+
+    这组测的是 L2（一条复杂 SQL）和 L3（多步分析）的边界，**不并入**基础 50 / 多轮 / hard，
+    也不设门槛、不进 CI。`expected_unsupported: true` 的题（为什么/归因）当前单条 SQL 答不了：
+    只记录系统实际响应（intent/sql/rows），**不算通过、也不算 SQL 失败**，避免为了分数硬编 expected。
+    """
+    catalog = catalog or load_catalog()
+    cases = _load(COMPLEX_CASES, "cases")
+    use_llm = engine == "llm"
+    details: list[dict] = []
+    hit = supported = unsupported = answered = bad_expected = 0
+    failure_counts: Counter[str] = Counter()
+    engine_counts: Counter[str] = Counter()
+    latencies: list[int] = []
+
+    for case in cases:
+        started = time.time()
+        plan = ask(case["question"], catalog=catalog, use_llm=use_llm)
+        latencies.append(int((time.time() - started) * 1000))
+        if plan.engine:
+            engine_counts[plan.engine] += 1
+
+        is_unsupported = bool(case.get("expected_unsupported"))
+        expected_rows: list[tuple] = []
+        expected_error = ""
+        failure = ""
+        matched = False
+        if is_unsupported:
+            unsupported += 1
+            # 当前答不了归因：只要它没乱编 SQL（或给出了局部数据）都如实记录，不判对错
+            answered += int(plan.ok and bool(plan.sql))
+            status = "unsupported"
+        else:
+            supported += 1
+            expected_rows, expected_error = _expected_result(case["expected_sql"], catalog)
+            bad_expected += int(bool(expected_error))
+            matched = _matched(plan, expected_rows, expected_error)
+            hit += int(matched)
+            failure = classify_failure(plan, matched)
+            if failure:
+                failure_counts[failure] += 1
+            status = "pass" if matched else "fail"
+
+        details.append({
+            "id": case["id"],
+            "question": case["question"],
+            "category": case["category"],
+            "note": case.get("note", ""),
+            "expected_unsupported": is_unsupported,
+            "status": status,
+            "intent": plan.intent,
+            "engine": plan.engine,
+            "sql": plan.sql,
+            "expected_sql": case.get("expected_sql", ""),
+            "ok": plan.ok,
+            "error": plan.error or expected_error,
+            "failure": failure,
+            "failure_stage": plan.failure_stage,
+            "exec_match": matched,
+            "answered": bool(plan.ok and bool(plan.sql)),
+            "rows": len(plan.rows) if plan.ok else 0,
+            "ms": plan.elapsed_ms,
+        })
+        if verbose:
+            if is_unsupported:
+                print(f"[SKIP] C{case['id']:>2} {case['question']}  "
+                      f"({plan.elapsed_ms}ms, 当前返回 {details[-1]['rows']} 行)"
+                      "  ← 归因题当前不支持，只记录不判分")
+                continue
+            flag = "[PASS]" if matched else "[FAIL]"
+            print(f"{flag} C{case['id']:>2} {case['question']}  "
+                  f"({plan.elapsed_ms}ms, {details[-1]['rows']} 行)")
+            if not matched:
+                actual = " ".join((plan.sql or "(空)").split())[:110]
+                print(f"    生成：{actual}")
+                print(f"    期望：{' '.join(case['expected_sql'].split())[:110]}")
+                stage = f"，stage={plan.failure_stage}" if plan.failure_stage else ""
+                print(f"    分类：{failure}（{FAILURE_LABELS.get(failure, failure)}）{stage}")
+                if plan.error:
+                    print(f"    错误：{plan.error}")
+
+    total = len(details)
+    return {
+        "complex_total": total,
+        "complex_supported": supported,
+        "complex_match": hit,
+        "complex_rate": round(hit / supported, 4) if supported else 0.0,
+        "complex_unsupported": unsupported,
+        "complex_unsupported_answered": answered,
+        "complex_engine": engine,
+        "complex_engine_counts": dict(sorted(engine_counts.items())),
+        "complex_failure_counts": dict(sorted(failure_counts.items())),
+        "complex_fallbacks": sum(v for k, v in engine_counts.items() if k != "llm") if use_llm else 0,
+        # 期望 SQL 是手写的：它自己不合法/跑不通时单独计数，不能混进"模型答错"
+        "complex_bad_expected": bad_expected,
+        "complex_avg_ms": int(sum(latencies) / total) if total else 0,
+        "complex_details": details,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="NL→SQL 评测：单轮执行一致率、多轮一致率、失败分类")
+    parser = argparse.ArgumentParser(description="NL→SQL 评测：单轮/多轮执行一致率、hard/complex 单独统计、失败分类")
     parser.add_argument("--json", action="store_true", help="输出 JSON（CI/前端用）")
     parser.add_argument("--threshold", type=float, default=0.9,
                         help="单轮执行一致率门槛，默认 0.9（SPEC 门槛 0.85，CI 按 0.9 卡）")
@@ -405,14 +510,20 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--hard", action="store_true",
                       help="只跑规则覆盖外的 hard cases（eval/hard_cases.json），"
                            "单独统计、不并入基础 50 条、不设门槛：它是规则 vs 模型的证据")
+    mode.add_argument("--complex", action="store_true",
+                      help="只跑复杂问法（eval/complex_cases.json）：CTE/窗口/分组 Top-N/多指标/"
+                           "占比/复购/多维度，单独统计、不并入其它组、不设门槛")
     parser.add_argument("--engine", choices=("rule", "llm"), default="rule",
                         help="rule=离线规则（CI 默认）；llm=真实模型（需 LLM_API_KEY，静默回退会判失败）")
     args = parser.parse_args(argv)
     load_env(ROOT / ".env")  # 本地跑 --engine llm 时读 key；CI 没有 .env 会自动跳过
 
-    if args.hard:
+    if args.complex:
+        summary = run_complex(verbose=not args.json, engine=args.engine)
+        checks: list[tuple[str, float, float]] = []  # complex 只报数字，不设门槛
+    elif args.hard:
         summary = run_hard(verbose=not args.json, engine=args.engine)
-        checks: list[tuple[str, float, float]] = []  # hard 只报数字，不设门槛
+        checks = []  # hard 只报数字，不设门槛
     elif args.multi_turn:
         summary = run_multi_turn(verbose=not args.json, engine=args.engine)
         checks = [("多轮一致率", summary["multi_turn_rate"], args.min_multi)]
@@ -428,14 +539,25 @@ def main(argv: list[str] | None = None) -> int:
     fallbacks = 0
     if args.engine == "llm":
         fallbacks = (summary.get("fallbacks", 0) + summary.get("multi_turn_fallbacks", 0)
-                     + summary.get("hard_fallbacks", 0))
-    bad_expected = summary.get("hard_bad_expected", 0)
+                     + summary.get("hard_fallbacks", 0) + summary.get("complex_fallbacks", 0))
+    bad_expected = summary.get("hard_bad_expected", 0) + summary.get("complex_bad_expected", 0)
 
     if args.json:
         print(json.dumps(summary, ensure_ascii=False, indent=1))
     else:
         print("-" * 60)
-        if args.hard:
+        if args.complex:
+            print(f"complex {summary['complex_total']} 条（可判定 {summary['complex_supported']} / "
+                  f"未支持 {summary['complex_unsupported']}）| 执行一致率 {summary['complex_rate']:.1%} "
+                  f"({summary['complex_match']}/{summary['complex_supported']}) | "
+                  f"未支持题仍返回 SQL {summary['complex_unsupported_answered']}/{summary['complex_unsupported']} | "
+                  f"平均 {summary['complex_avg_ms']}ms")
+            counts = summary["complex_failure_counts"]
+            print("失败分类：" + ("无" if not counts else " / ".join(f"{k} {v}" for k, v in counts.items())))
+            if bad_expected:
+                print(f"未达标：complex 用例的 expected_sql 自身有问题 {bad_expected} 条"
+                      "（先修期望 SQL，它不算模型答错）")
+        elif args.hard:
             print(f"hard {summary['hard_total']} 条（规则覆盖外）| 命中率 {summary['hard_rate']:.1%} "
                   f"({summary['hard_match']}/{summary['hard_total']}) | 平均 {summary['hard_avg_ms']}ms")
             counts = summary["hard_failure_counts"]

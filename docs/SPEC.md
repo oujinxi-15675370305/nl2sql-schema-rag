@@ -41,6 +41,11 @@
 - **AC-1.4**：修复路径不得绕过校验器（修复后的 SQL 仍要过 `validate`）。
 - **AC-1.5**：关闭重试（`max_repair=0`）时，行为与旧版一致（只尝试一次）。
 - **AC-1.6**：单条 SQL 有执行预算（默认 5 秒），超时中断并记为失败；超时不重试同一句（重跑只会再烧满一次预算）。
+- **AC-1.7**：校验器放行只读的 `WITH ... SELECT`（CTE + 窗口函数）；CTE 名不能当成未知表，
+  DML 关键字仍拒绝。用于"每个品类销售额前两名商品"这类分组 Top-N；普通 `SELECT` 不受影响。
+- **AC-1.8**：生成后做筛选形状检查：上文筛选值必须保留；单值筛选且没有维度时，不得把筛选列
+  放进 SELECT（"改成华南"只换条件，不按地区分组）。违反时当作一次 validate 失败、把话术作为
+  `feedback` 重写，不执行错误 SQL；多值筛选（"华东和华南对比"）允许按筛选列分组。
 
 ### M2 意图路由（P0）
 
@@ -98,6 +103,13 @@
   `eval/llm_result.json`（由 `scripts/record_llm_eval.py` 生成：剥掉 `details`，静默回退或 hard 期望 SQL
   报错时不落盘），`GET /api/eval/llm/last` 读它——有快照返回 `available=true` + 模型/日期/汇总，
   缺失或损坏返回 `available=false`（页面隐藏）。接口、页面加载与测试都**不得触发模型调用**。
+- **AC-5.8**：复杂问法独立成组 `eval/complex_cases.json`（10–15 条：CTE/窗口、分组 Top-N、多指标、
+  占比、复购、多维度，另含 1 条归因题），`--complex` 单独跑并输出
+  `complex_total / complex_supported / complex_match / complex_rate / complex_engine_counts /
+  complex_failure_counts`，**不并入**基础单轮、多轮与 hard；期望 SQL 手写、必须过校验与执行，
+  且已支持题不能被路由提前判成 clarify/unsafe。`expected_unsupported` 的归因题只记录实际响应，
+  不算通过也不算 SQL 失败；该组不作 CI 门槛（CI 仍只跑基础集）。
+  口径限制：按品类/商品/品牌拆分的分组 GMV 沿用整单 `pay_amount`，不可跨组相加（见 README）。
 
 ### M6 交付物：Docker + 截图 + GIF（P1）
 
@@ -180,15 +192,16 @@ GET /api/health → { ok, tables, metrics, roles }
 | 模块 | 状态 | 备注 |
 |---|---|---|
 | 基线（M0：检索/生成/校验/执行/评测/页面） | ✅ 已完成 | 20 条评测 100% |
-| M1 SQL 自我修复 | ✅ 已完成 | 9 条测试（含 error 清理 / engine / 超时回归）；`scripts/demo_repair.py` 可复现 |
+| M1 SQL 自我修复 | ✅ 已完成 | 9 条测试（含 error 清理 / engine / 超时回归）；`scripts/demo_repair.py` 可复现；2026-11-22 放行只读 CTE/窗口函数（AC-1.7）、加筛选形状检查（AC-1.8） |
 | M2 意图路由 | ✅ 已完成 | 13 条测试；槽位判澄清；非 ask 不生成 SQL，返回话术；前端已接；2026-11-22 补：维度清单（有哪些X）不澄清，交模型写 `SELECT DISTINCT`，有筛选时澄清项也补维度 |
 | M1/M2 审核修复 | ✅ 已完成 | 2026-11-13 |
 | M3 多轮追问 | ✅ 已完成 | 35 条测试（AC-3.1~3.6，含标签覆盖/客户维度回环）；顺序 `session → 槽位继承 → classify → 生成`，classify 只收槽位；会话进程内、默认 5 轮 |
 | M4 权限与脱敏 | ✅ 已完成 | 29 条权限测试 + 7 条 HTTP 契约；顺序 `role → 裁剪 catalog → 槽位 → classify → 检索/生成`；列白名单（含禁 `*`）、裸投影掩码 + 值兜底、审计；2026-11-16 审核补了两条绕过路径 |
-| M5 评测与 CI | ✅ 已完成 | 57 条单轮（50 问数 + 7 意图/越权；6 指标 × 6 维度、31/36 组合、6 类时间）+ 7 会话 21 轮多轮评测；失败分类（routed/permission/validate/field/syntax/timeout/retrieval/result/intent）汇总；CI 三门槛 90% + artifact；扩容时修了退款率二次舍入；`--engine llm` 实测 deepseek-chat 单轮 50/50、多轮 21/21、回退 0（2026-11-20）；规则覆盖外 10 条（AC-5.6）规则 0/10、模型 6–8/10（多次采样，最近快照 6–8/10） |
-| M6 Docker + 截图/GIF | ✅ 已完成 | `docker compose up --build` 起 8000（容器内 seed、healthcheck、空 volume 补 seed）；`scripts/shots.py` 固定脚本产出 3 图 + 1 GIF；离线演示修复走 `/api/demo/repair`（脚本化生成器，不写会话、不参与评测）；175 个单测 |
+| M5 评测与 CI | ✅ 已完成 | 57 条单轮（50 问数 + 7 意图/越权；6 指标 × 6 维度、31/36 组合、6 类时间）+ 7 会话 21 轮多轮评测；失败分类（routed/permission/validate/field/syntax/timeout/retrieval/result/intent）汇总；CI 三门槛 90% + artifact；扩容时修了退款率二次舍入；`--engine llm` 实测 deepseek-chat 单轮 50/50、多轮 21/21、回退 0（2026-11-20）；规则覆盖外 10 条（AC-5.6）规则 0/10、模型 7–8/10（多次采样，最近快照 7–8/10） |
+| M6 Docker + 截图/GIF | ✅ 已完成 | `docker compose up --build` 起 8000（容器内 seed、healthcheck、空 volume 补 seed）；`scripts/shots.py` 固定脚本产出 3 图 + 1 GIF；离线演示修复走 `/api/demo/repair`（脚本化生成器，不写会话、不参与评测）；180 个单测 |
 | LLM 主线化 / 规则 fallback（2026-11-20） | ✅ 已完成 | 规则 SQL 移到 `app/fallback.py`（`OfflineFallback`，离线降级 + CI 基线），`agent.py` 只留 LLM/校验/执行/重试；新增 `eval/hard_cases.json` 10 条与 `--hard` runner（单独统计、不进 CI）；README/SPEC/decisions 改成模型主线；166 测试全绿，CI 仍只跑 `--engine rule` |
-| 页面离线基线 / 模型快照（2026-11-21） | ✅ 已完成 | 按钮改「跑离线基线」；`scripts/record_llm_eval.py` 生成 `eval/llm_result.json`（只读快照），`GET /api/eval/llm/last` 有则显示「上次模型评测」、无/损坏则隐藏；接口与测试均不调模型；BIRD/Spider/DuSQL 仅方案评估、不接；175 单测 |
+| 页面离线基线 / 模型快照（2026-11-21） | ✅ 已完成 | 按钮改「跑离线基线」；`scripts/record_llm_eval.py` 生成 `eval/llm_result.json`（只读快照），`GET /api/eval/llm/last` 有则显示「上次模型评测」、无/损坏则隐藏；接口与测试均不调模型；BIRD/Spider/DuSQL 仅方案评估、不接；180 单测 |
+| 复杂问法评测（2026-11-22） | ✅ 已完成 | 13 条（12 可判定 + 1 归因未支持），`--complex` 单独统计、不进 CI；规则 0/12、`deepseek-chat` 7–8/12（9 次：7 分七次、8 分两次）、回退 0；189 单测；分组 GMV 口径见 README |
 
 ## 8. 开发约定
 
