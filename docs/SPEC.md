@@ -121,6 +121,23 @@
   复现"第一次写错列名 → 带报错改对"（响应结构与 `/api/ask` 一致，`attempts` 里能看到 execute 阶段失败），
   **只做演示**：不写会话、不参与评测、不影响生成器。
 
+### M7 分析模式（P1，可选，默认关闭）
+
+- **AC-7.1**：`ask(..., mode="single" | "analysis")` 默认 `single`，快路径响应结构不变；
+  `POST /api/ask` 增加 `mode`（未知值 400）。analysis 响应在原有字段外增加
+  `mode / steps / answer / evidence`，step 含 `question / purpose / sql / columns / rows /
+  row_count / ok / skipped / error / engine / elapsed_ms`。
+- **AC-7.2**：Planner 只接收改写后的问句（不带 schema），输出 2–4 个自包含子问题的 JSON；
+  坏 JSON/空步骤重试 1 次，仍失败回退 `single` 并带 `analysis_error`；步数上限 4，超出截断。
+- **AC-7.3**：Executor 每步复用 `ask(mode="single")`，同 role、不共享 session；澄清/越权/
+  预算不足标 `skipped` 不硬跑；失败步骤保留 sql/error，不隐藏；SQL 仍走校验/权限/只读/5s 超时。
+- **AC-7.4**：Synthesizer 不给 schema、不允许写 SQL；结论 1–3 段且必须引用成功的 `[sN]`；
+  无证据时不调模型、直接说“当前结果不足以判断”；失败步骤由代码补进“局限”；结论只做长度/
+  空白/引用检查，不做 SQL 校验。
+- **AC-7.5**：默认关闭、页面有开关；模型先用 `deepseek-chat`，`ANALYSIS_MODEL` 只影响
+  Planner/Synthesizer；A/B 报告结论质量、步骤失败率、耗时与 token；不换默认模型。
+  测试不碰真实模型；基础 50/50、多轮 21/21、hard/complex 数字不得回退。
+
 ## 4. 契约（公开接口，改动需改本文件）
 
 ```python
@@ -202,6 +219,7 @@ GET /api/health → { ok, tables, metrics, roles }
 | LLM 主线化 / 规则 fallback（2026-11-20） | ✅ 已完成 | 规则 SQL 移到 `app/fallback.py`（`OfflineFallback`，离线降级 + CI 基线），`agent.py` 只留 LLM/校验/执行/重试；新增 `eval/hard_cases.json` 10 条与 `--hard` runner（单独统计、不进 CI）；README/SPEC/decisions 改成模型主线；166 测试全绿，CI 仍只跑 `--engine rule` |
 | 页面离线基线 / 模型快照（2026-11-21） | ✅ 已完成 | 按钮改「跑离线基线」；`scripts/record_llm_eval.py` 生成 `eval/llm_result.json`（只读快照），`GET /api/eval/llm/last` 有则显示「上次模型评测」、无/损坏则隐藏；接口与测试均不调模型；BIRD/Spider/DuSQL 仅方案评估、不接；180 单测 |
 | 复杂问法评测（2026-11-22） | ✅ 已完成 | 13 条（12 可判定 + 1 归因未支持），`--complex` 单独统计、不进 CI；规则 0/12、`deepseek-chat` 7–8/12（9 次：7 分七次、8 分两次）、回退 0；189 单测；分组 GMV 口径见 README |
+| 分析模式 MVP（2026-11-23） | ✅ 已完成 | `mode=analysis` 默认关闭；Planner 2–4 步 → 每步复用 `ask` → Synthesizer 引用 `[sN]`、失败补“局限”；218 单测；A/B 3 题：chat 4.6s/2 条完整、reasoner 11.8s/3 条完整，步骤均 6/6，无假因果；默认不换模型 |
 
 ## 8. 开发约定
 

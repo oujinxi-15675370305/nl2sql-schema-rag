@@ -51,10 +51,33 @@ def _llm_result_payload(path: Path | None = None) -> dict:
     return {**data, "available": True}
 
 
-def _plan_payload(plan: SQLPlan, question: str) -> dict:
-    """`/api/ask` 和 `/api/demo/repair` 共用一份响应结构，前端只写一套渲染。"""
-    ctx, keywords = plan.context, plan.keywords
+def _step_payload(step) -> dict:
     return {
+        "id": step.id,
+        "question": step.question,
+        "purpose": step.purpose,
+        "depends_on": step.depends_on,
+        "sql": step.sql,
+        "columns": step.columns,
+        "rows": [list(row) for row in step.rows],
+        "row_count": step.row_count,
+        "ok": step.ok,
+        "skipped": step.skipped,
+        "error": step.error,
+        "intent": step.intent,
+        "engine": step.engine,
+        "elapsed_ms": step.elapsed_ms,
+    }
+
+
+def _plan_payload(plan: SQLPlan, question: str) -> dict:
+    """`/api/ask` 和 `/api/demo/repair` 共用一份响应结构，前端只写一套渲染。
+
+    快路径（mode=single）字段完全不变；只有分析模式或规划失败回退时才追加
+    mode/steps/answer/evidence，避免页面和旧调用方被新字段影响。
+    """
+    ctx, keywords = plan.context, plan.keywords
+    payload = {
         "question": question,
         "role": plan.role,
         "sql": plan.sql,
@@ -82,6 +105,18 @@ def _plan_payload(plan: SQLPlan, question: str) -> dict:
                         for h in ctx.columns],
         },
     }
+    if plan.mode == "analysis" or plan.analysis_error:
+        payload["mode"] = plan.mode
+        payload["steps"] = [_step_payload(step) for step in plan.steps]
+        payload["answer"] = plan.answer
+        payload["evidence"] = plan.evidence
+        if plan.analysis_error:
+            payload["analysis_error"] = plan.analysis_error
+        if plan.analysis_warning:
+            payload["analysis_warning"] = plan.analysis_warning
+        if plan.usage:
+            payload["usage"] = plan.usage
+    return payload
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -174,6 +209,11 @@ class Handler(BaseHTTPRequestHandler):
         question = str(payload.get("question", "")).strip()
         if not question:
             return self._send(*_json({"ok": False, "error": "question 不能为空"}, 400))
+        # Step 2：分析模式必须显式传，默认仍是单 SQL 快路径；未知值不静默降级
+        mode = str(payload.get("mode") or "single").strip()
+        if mode not in ("single", "analysis"):
+            return self._send(*_json(
+                {"ok": False, "error": f"未知 mode：{payload.get('mode')!r}（可选 single / analysis）"}, 400))
 
         # M3：前端没带 session_id 就新开一个，带回来就接着上文
         session = SESSIONS.get(str(payload.get("session_id") or "").strip() or None)
@@ -184,6 +224,7 @@ class Handler(BaseHTTPRequestHandler):
             use_llm=payload.get("use_llm", True),
             session=session,
             role=role,
+            mode=mode,
         )
         self._send(*_json(_plan_payload(plan, question)))
 

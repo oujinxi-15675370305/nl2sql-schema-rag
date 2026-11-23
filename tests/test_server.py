@@ -16,6 +16,7 @@ from pathlib import Path
 from unittest import mock
 
 from app.server import Handler
+from app.domain import AnalysisStep, SQLPlan
 
 
 class AskApiTest(unittest.TestCase):
@@ -77,6 +78,52 @@ class AskApiTest(unittest.TestCase):
         # M5：attempts[].stage 与 failure_stage 进 HTTP 契约（失败分类靠它们）
         self.assertEqual(data["failure_stage"], "")
         self.assertEqual(data["attempts"][-1]["stage"], "ok")
+
+    def test_analysis_mode_contract(self) -> None:
+        # Step 2：mode=analysis 返回 steps/answer/evidence；快路径的字段仍然在
+        plan = SQLPlan(
+            question="各地区的GMV", ok=True, intent="ask", engine="analysis",
+            mode="analysis", elapsed_ms=12,
+            steps=[AnalysisStep(
+                id="s1", question="各地区的GMV", purpose="看分布", sql="SELECT 1",
+                columns=["n"], rows=[(1,)], row_count=1, ok=True,
+                engine="llm", elapsed_ms=5,
+            )],
+            answer="一共有 1 行 [s1]。", evidence=["s1"],
+            usage={"prompt_tokens": 3, "completion_tokens": 4},
+        )
+        with mock.patch("app.server.ask", return_value=plan):
+            status, data = self._post("各地区的GMV", mode="analysis")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["mode"], "analysis")
+        self.assertEqual(data["answer"], "一共有 1 行 [s1]。")
+        self.assertEqual(data["evidence"], ["s1"])
+        self.assertEqual(data["steps"][0]["id"], "s1")
+        self.assertEqual(data["steps"][0]["rows"], [[1]])
+        self.assertTrue(data["steps"][0]["ok"])
+        self.assertEqual(data["usage"]["completion_tokens"], 4)
+
+    def test_single_mode_response_has_no_analysis_keys(self) -> None:
+        # 快路径结构不变：不传 mode 时没有 mode/steps/answer/evidence
+        _, data = self._post("各地区的GMV", use_llm=False)
+        self.assertNotIn("mode", data)
+        self.assertNotIn("steps", data)
+        self.assertNotIn("answer", data)
+        self.assertNotIn("evidence", data)
+
+    def test_analysis_offline_falls_back_to_single(self) -> None:
+        # 离线/规则模式没有 Planner：明确回退单 SQL，并把原因带回来，不假装分析成功
+        _, data = self._post("各地区的GMV", mode="analysis", use_llm=False)
+        self.assertEqual(data["mode"], "single")
+        self.assertEqual(data["steps"], [])
+        self.assertIn("离线", data["analysis_error"])
+        self.assertTrue(data["sql"])
+        self.assertEqual(data["engine"], "rule")
+
+    def test_unknown_mode_is_rejected(self) -> None:
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self._post("各地区的GMV", mode="react")
+        self.assertEqual(ctx.exception.code, 400)
 
     def test_demo_repair_contract(self) -> None:
         # M6：离线演示"写错列名 → 带报错改对"，前端时间线用同一份 attempts 结构

@@ -15,6 +15,8 @@ const llmLastCardEl = $("#llm-last-card");
 const engineBadgeEl = $("#engine-badge");
 const emptyStateEl = $("#empty-state");
 const sqlBlockEl = $("#sql-block");
+const analysisEl = $("#analysis");
+const modeEl = $("#mode-analysis");
 
 // M3：会话 id 由服务端下发；带上它才能接上文（"那上个月呢"）
 let sessionId = "";
@@ -46,8 +48,16 @@ const ENGINE_LABEL = {
   llm: "模型生成",
   rule: "规则 fallback",
   custom: "固定 SQL 演示",
+  analysis: "分析模式",
 };
-const ENGINE_CLASS = { llm: "engine-llm", rule: "engine-rule", custom: "engine-custom" };
+const ENGINE_CLASS = {
+  llm: "engine-llm",
+  rule: "engine-rule",
+  custom: "engine-custom",
+  analysis: "engine-analysis",
+};
+// 分析步骤的表格只渲染前 20 行；综合器最多看 50 行（见 app/analysis.py PREVIEW_ROWS）
+const STEP_PREVIEW_ROWS = 20;
 
 const INTENT_SAMPLES = ["上个月的GMV", "各地区的订单数"];
 
@@ -115,11 +125,8 @@ function clearTags() {
   });
 }
 
-function renderTable(columns, rows) {
-  if (!rows || !rows.length) {
-    tableWrap.innerHTML = `<div class="empty">没有数据</div>`;
-    return;
-  }
+function tableHtml(columns, rows) {
+  if (!rows || !rows.length) return `<div class="empty">没有数据</div>`;
   const numeric = columns.map((_, index) =>
     rows.every((row) => row[index] === null || typeof row[index] === "number")
   );
@@ -139,7 +146,11 @@ function renderTable(columns, rows) {
       return `<tr>${cells.join("")}</tr>`;
     })
     .join("");
-  tableWrap.innerHTML = `<table>${head}<tbody>${body}</tbody></table>`;
+  return `<table>${head}<tbody>${body}</tbody></table>`;
+}
+
+function renderTable(columns, rows) {
+  tableWrap.innerHTML = tableHtml(columns, rows);
 }
 
 // 非问数意图：显示话术；澄清时列出要补的信息，其它意图给两个可直接点的示例
@@ -175,6 +186,91 @@ function renderAttempts(attempts) {
     `<div class="attempts-title">自我修复：共尝试 ${attempts.length} 次</div>` + rows.join("");
 }
 
+// 结论里的 [s1] 是步骤引用：先整体转义，再把引用包成小标签（转义不会动方括号）
+function formatAnswer(text) {
+  return escapeHtml(text)
+    .replace(/\n/g, "<br>")
+    .replace(/\[s(\d+)\]/gi, '<span class="cite">[s$1]</span>');
+}
+
+function renderStep(step) {
+  const skipped = !!step.skipped;
+  const state = step.ok ? "ok" : skipped ? "skip" : "err";
+  const label = step.ok ? "成功" : skipped ? "跳过" : "失败";
+  const cardClass = step.ok ? "" : skipped ? " skipped" : " err";
+  const purpose = [
+    step.purpose,
+    (step.depends_on || []).length ? `依赖 ${step.depends_on.join("/")}` : "",
+  ].filter(Boolean).join(" · ");
+  const error = step.error ? `<div class="step-error">${escapeHtml(step.error)}</div>` : "";
+  const sql = step.sql ? `<div class="step-sql">${highlightSql(step.sql)}</div>` : "";
+  const rows = (step.rows || []).slice(0, STEP_PREVIEW_ROWS);
+  const table = (step.ok && rows.length)
+    ? `<div class="step-table">${tableHtml(step.columns || [], rows)}</div>`
+    : "";
+  const foot = [];
+  if (step.engine) foot.push(`来源 ${ENGINE_LABEL[step.engine] || step.engine}`);
+  if (step.row_count) {
+    const preview = rows.length < step.row_count ? ` · 预览 ${rows.length} 行` : "";
+    foot.push(`共 ${step.row_count} 行${preview}`);
+  }
+  if (step.elapsed_ms) foot.push(`${step.elapsed_ms} ms`);
+  return `<div class="step-card${cardClass}">
+    <div class="step-head">
+      <div>
+        <div class="step-title"><span class="step-id">[${escapeHtml(step.id)}]</span> ${escapeHtml(step.question)}</div>
+        ${purpose ? `<p class="step-purpose">${escapeHtml(purpose)}</p>` : ""}
+      </div>
+      <span class="step-badge ${state}">${label}</span>
+    </div>
+    ${error}${sql}${table}
+    ${foot.length ? `<div class="step-foot">${foot.map((x) => `<span>${escapeHtml(x)}</span>`).join("")}</div>` : ""}
+  </div>`;
+}
+
+function renderAnalysis(data) {
+  if (sqlBlockEl) sqlBlockEl.hidden = true;
+  tableWrap.innerHTML = "";
+  answerEl.innerHTML = "";
+  setEngineBadge("analysis");
+  const steps = data.steps || [];
+  const okCount = steps.filter((s) => s.ok).length;
+  const parts = [];
+  if (data.analysis_warning) {
+    parts.push(`<div class="analysis-note">${escapeHtml(data.analysis_warning)}</div>`);
+  }
+  if (data.analysis_error) {
+    parts.push(`<div class="analysis-note">${escapeHtml(data.analysis_error)}</div>`);
+  }
+  if (data.answer) {
+    parts.push(`<div class="analysis-answer"><h3>结论</h3>` +
+      `<div class="analysis-text">${formatAnswer(data.answer)}</div></div>`);
+  }
+  if (steps.length) {
+    parts.push(`<div class="steps-head"><h3>执行步骤</h3>` +
+      `<span>${okCount}/${steps.length} 步成功</span></div>`);
+    parts.push(steps.map(renderStep).join(""));
+  }
+  analysisEl.innerHTML = parts.join("");
+  analysisEl.hidden = !parts.length;
+  const usage = data.usage && (data.usage.prompt_tokens || data.usage.completion_tokens)
+    ? ` · token ${data.usage.prompt_tokens || 0}+${data.usage.completion_tokens || 0}`
+    : "";
+  metaEl.textContent = `${steps.length} 步 · ${okCount} 步成功 · ${data.elapsed_ms} ms${usage}`;
+  if (!steps.length) {
+    setState(data.analysis_error || "没有可执行步骤", "error");
+  } else if (!data.answer) {
+    // 步骤结果还在，但综合失败/没给结论：不能显示“完成”
+    setState("综合未完成，步骤结果仍可查看", "error");
+  } else if (okCount === steps.length) {
+    setState("完成", "ok");
+  } else if (okCount > 0) {
+    setState(`部分步骤失败：${steps.length - okCount}/${steps.length}`, "error");
+  } else {
+    setState("没有可用结果", "error");
+  }
+}
+
 function clearResult() {
   metaEl.textContent = "";
   sqlEl.textContent = "—";
@@ -182,6 +278,10 @@ function clearResult() {
   tableWrap.innerHTML = "";
   answerEl.innerHTML = "";
   attemptsEl.innerHTML = "";
+  if (analysisEl) {
+    analysisEl.innerHTML = "";
+    analysisEl.hidden = true;
+  }
   setEngineBadge(null);
   if (emptyStateEl) emptyStateEl.hidden = true;
   if (sqlBlockEl) sqlBlockEl.hidden = false;
@@ -228,6 +328,26 @@ function renderResult(data) {
   // M3：告诉用户这句被补了什么，不然"那上个月呢"的结果看着像凭空来的
   if (data.inherited_slots && data.inherited_slots.length && data.rewritten_question) {
     rewriteEl.textContent = `承接上文 → ${data.rewritten_question}`;
+  }
+
+  // Step 2：分析模式有独立结构（结论 + 步骤）；Planner 失败会回退 mode=single
+  if (data.mode === "analysis") {
+    if (data.intent && data.intent !== "ask") {
+      // 澄清/越权在分析模式下仍然只回话术，不硬跑步骤
+      renderReply(data, INTENT_SAMPLES);
+      setEngineBadge("analysis");
+      if (sqlBlockEl) sqlBlockEl.hidden = true;
+      setState(`意图：${INTENT_LABEL[data.intent] || data.intent}`, "info");
+      return;
+    }
+    renderAnalysis(data);
+    return;
+  }
+  if (data.analysis_error) {
+    // 规划失败回退单 SQL：明确告诉用户这一轮没跑分析，而不是悄悄少几步
+    analysisEl.hidden = false;
+    analysisEl.innerHTML =
+      `<div class="analysis-note">分析模式未执行：${escapeHtml(data.analysis_error)}</div>`;
   }
 
   // M2：非 ask 不生成 SQL，页面显示意图话术而不是"失败"
@@ -292,6 +412,7 @@ async function run(question) {
       question: q,
       role,
       ...(sessionId ? { session_id: sessionId } : {}),
+      ...(modeEl && modeEl.checked ? { mode: "analysis" } : {}),
     });
     renderResult(data);
   } catch (err) {

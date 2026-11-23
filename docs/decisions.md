@@ -256,6 +256,23 @@ Step 1 的 13 条 complex 用例里有 5 条（#1/#6/#9/#10/#12）按品类/商�
 
 没有把 expected 改成 `SUM(order_items.item_amount)`：prompt 和口径里已经写死“GMV 只能用 `pay_amount`”，直接换会让基础集与模型契约一起漂。complex 沿用基础集写法，保证与既有 50 条可比；代价是分组 GMV 不可跨组相加，也不能当“真实分摊销售额”用。要可加口径，应新增独立指标（如 `line_amount = SUM(order_items.item_amount)`）并重录基础集，那是单独任务。README 与 `eval/complex_cases.json` 都写了这条限制，Step 2 的分析结论不能把分组 GMV 当可加事实。
 
+## 2026-11-23 分析模式 MVP：有界 plan-and-execute，默认关闭
+
+Step 2 没有引入 LangGraph/ReAct：新增 `app/analysis.py`，Planner 只看改写后的问句、拆 2–4 个自包含子问题；Executor 每步复用 `agent.ask(mode="single")`，同 role、不共享 session，校验/权限/只读/5s 超时全部沿用；Synthesizer 只看步骤结果，不给 schema、不能再写 SQL，结论必须引用 `[sN]`。
+
+三个刻意的边界：
+
+1. **默认关闭**：页面开关默认关，HTTP 不传 `mode` 就是快路径，响应结构不变。
+2. **失败不隐藏**：澄清/越权/预算不足标 `skipped`；Planner 失败回退单 SQL 并带 `analysis_error`；Synthesizer 没有成功步骤时不调模型，直接说“当前结果不足以判断”；模型漏写的失败步骤由代码补进“局限”。
+3. **先测量再换模型**：Planner/Synthesizer 用 `ANALYSIS_MODEL`（默认同 `LLM_MODEL`）。3 条 complex 题 A/B：`deepseek-chat` 平均 4.6s、2 条完整；`deepseek-reasoner` 平均 11.8s、3 条完整；两者步骤都 6/6、无假因果。reasoner 的 completion token 约为 chat 的 4.4 倍，样本只有 3 条，**不换默认模型**，下一步扩到 complex 全集再决策。
+
+A/B 第一轮抓到两个真问题，按“先测量”改的是提示词/输入，不是期望：
+
+- 综合器原来只看 20 行预览：reasoner 在分组 Top-N 题上漏看 24 行里的目标商品，算错。现在执行层保留 50 行给综合器、UI 仍只渲染 20 行，prompt 明确“截断后的行不能用于排名/汇总推断”。
+- Planner 把“退款率（退款金额/订单金额或退款订单数/订单数）”这种公式写进子问题，SQL 生成选了金额口径。现在 Planner prompt 明确“不要写 SQL、公式或指标口径”，由执行器按 catalog 定义生成。
+
+已知没解决：Planner 仍可能拆得不好（chat 在月度环比题上把“去年12月”拆成独立步骤，却没生成 LAG 环比，结论只能说“缺计算步骤”）；步骤 `ok=true` 只代表 SQL 跑通，不代表业务口径对；50 行之外仍可能漏数据。
+
 ## 还没想清楚
 
 - 指标口径冲突怎么办：同一个"客单价"，不同部门算法不一样。现在是单一 metric 定义，真做要加"口径版本"。

@@ -141,6 +141,40 @@ class SchemaContext:
 
 
 @dataclass
+class AnalysisStep:
+    """分析模式的一步：子问题 + 实际执行的 SQL 与结果预览。"""
+
+    id: str
+    question: str
+    purpose: str = ""
+    depends_on: list[str] = field(default_factory=list)
+    sql: str = ""
+    columns: list[str] = field(default_factory=list)
+    rows: list[tuple] = field(default_factory=list)  # UI 预览行（最多 20 行）
+    row_count: int = 0  # 实际取回行数（执行层最多 200 行）
+    ok: bool = False
+    skipped: bool = False  # 被澄清/越权/预算拦下，没有硬跑
+    error: str = ""
+    intent: str = ""
+    engine: str = ""
+    elapsed_ms: int = 0
+
+
+@dataclass
+class AnalysisResult:
+    """Planner → Executor → Synthesizer 的汇总；planner_ok=False 时回退单 SQL。"""
+
+    steps: list[AnalysisStep] = field(default_factory=list)
+    answer: str = ""
+    evidence: list[str] = field(default_factory=list)
+    error: str = ""
+    warning: str = ""
+    usage: dict[str, int] = field(default_factory=dict)
+    elapsed_ms: int = 0
+    planner_ok: bool = True
+
+
+@dataclass
 class SQLPlan:
     question: str
     sql: str = ""
@@ -162,3 +196,11 @@ class SQLPlan:
     inherited_slots: list[str] = field(default_factory=list)  # M3：本轮从上文继承的槽位名
     role: str = "analyst"  # M4：本次请求的角色
     masked_columns: list[str] = field(default_factory=list)  # M4：被服务端掩码的列
+    # 分析模式（mode="analysis"）：快路径这些字段保持默认值，响应结构不变
+    mode: str = "single"
+    steps: list[AnalysisStep] = field(default_factory=list)
+    answer: str = ""
+    evidence: list[str] = field(default_factory=list)
+    analysis_error: str = ""  # 规划失败/综合失败；规划失败时回退单 SQL
+    analysis_warning: str = ""
+    usage: dict[str, int] = field(default_factory=dict)

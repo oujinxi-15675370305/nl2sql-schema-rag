@@ -104,6 +104,16 @@
         <label for="q" class="field-label">你的问题</label>
         <textarea id="q" rows="4" placeholder="例如：上个月各地区的 GMV 是多少？"></textarea>
 
+        <label class="mode-switch" for="mode-analysis"
+               title="显式开启后有界拆成 2–4 步，每步复用同一条校验/权限/执行链路，最后只依据步骤结果综合；默认关闭">
+          <input type="checkbox" id="mode-analysis" />
+          <span class="mode-track" aria-hidden="true"></span>
+          <span class="mode-copy">
+            <strong>分析模式</strong>
+            <small>拆成 2–4 步逐条查，再综合结论；默认关闭，单 SQL 够用时走快路径</small>
+          </span>
+        </label>
+
         <div class="samples-head"><span>试试这些</span><span class="samples-note">点击直接运行</span></div>
         <div class="samples"></div>
 
@@ -153,6 +163,7 @@
 
         <div id="rewrite" class="rewrite"></div>
         <div id="answer" class="answer"></div>
+        <div id="analysis" class="analysis" hidden></div>
         <div id="attempts" class="attempts"></div>
         <div id="table-wrap" class="table-wrap"></div>
 

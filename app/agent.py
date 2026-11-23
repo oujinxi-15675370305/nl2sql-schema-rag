@@ -353,14 +353,20 @@ def ask(
     max_repair: int = 2,
     session: Session | None = None,
     role: str = permissions.DEFAULT_ROLE,
+    mode: str = "single",
 ) -> SQLPlan:
     """AC-1.1：失败带报错重试；AC-1.4：每次尝试都要过校验；AC-1.5：max_repair=0 只跑一次。
+
+    `mode="analysis"` 走有界 plan-and-execute（`app/analysis.py`）：Planner 失败或离线模式时
+    回退本函数的单 SQL 快路径，并把原因放进 `analysis_error`；默认 `mode="single"`，结构不变。
 
     顺序（AC-3.6）：
     **role → 按角色裁剪 catalog → session 槽位继承 → classify → 检索/build_context → 生成**。
     不能先路由："那上个月呢"字面上没有指标，先路由会被判成 clarify。
     列过滤必须在检索之前，否则隐藏列会进 context / prompt（AC-4.1）。
     """
+    if mode not in ("single", "analysis"):
+        raise ValueError(f"未知模式：{mode!r}（可选 single / analysis）")
     started = time.time()
     full_catalog = catalog or load_catalog()
     hidden = permissions.hidden_columns(full_catalog, role)  # 未知角色在这里抛 ValueError
@@ -386,10 +392,14 @@ def ask(
     denied = permissions.denied_terms(full_catalog, role)
     route = classify(question, catalog, slots, denied_terms=denied)  # AC-2.1 / AC-4.2
     plan.intent = route.intent
+    plan.mode = mode
     if route.intent != "ask":  # AC-2.2：只有 ask 生成 SQL
         plan.reply = reply_for(route)
         plan.clarify_options = route.clarify_options
         plan.context = None  # 非 ask 不检索、也不返回 schema（AC-4.1）
+        if mode == "analysis":
+            # 分析模式也要能回答澄清/越权：直接复用话术，不硬跑步骤
+            plan.answer = plan.reply
         if route.intent == "unsafe":  # AC-4.4：越权/写操作尝试进审计
             permissions.AUDIT_LOG.record(
                 role=role, question=question, session_id=plan.session_id, reason=route.reason
@@ -404,6 +414,36 @@ def ask(
 
     if session is not None:
         session.add(question, slots)  # AC-3.1：只把真正问数的一轮记成上下文
+
+    # 分析模式：Planner/Executor/Synthesizer 每步复用本函数；失败回退下面的单 SQL 快路径
+    if mode == "analysis":
+        if not use_llm:
+            plan.mode = "single"
+            plan.analysis_error = "分析模式需要模型规划；当前是离线/规则模式，已回退单 SQL"
+        else:
+            from app.analysis import run_analysis  # 局部导入：analysis 会把 ask 当执行器传回来
+            result = run_analysis(
+                rewritten,
+                role=role,
+                catalog=full_catalog,
+                retriever=retriever,
+                ask_fn=ask,
+                use_llm=use_llm,
+            )
+            if result.planner_ok:
+                plan.mode = "analysis"
+                plan.steps = result.steps
+                plan.answer = result.answer
+                plan.evidence = result.evidence
+                plan.analysis_error = result.error
+                plan.analysis_warning = result.warning
+                plan.usage = result.usage
+                plan.ok = any(step.ok for step in result.steps)
+                plan.engine = "analysis"
+                plan.elapsed_ms = result.elapsed_ms
+                return plan
+            plan.mode = "single"
+            plan.analysis_error = result.error
 
     feedback: str | None = None
     for attempt in range(max(0, max_repair) + 1):
