@@ -87,7 +87,7 @@ class AskApiTest(unittest.TestCase):
             steps=[AnalysisStep(
                 id="s1", question="各地区的GMV", purpose="看分布", sql="SELECT 1",
                 columns=["n"], rows=[(1,)], row_count=1, ok=True,
-                engine="llm", elapsed_ms=5,
+                warning="GMV 口径提醒", engine="llm", elapsed_ms=5,
             )],
             answer="一共有 1 行 [s1]。", evidence=["s1"],
             usage={"prompt_tokens": 3, "completion_tokens": 4},
@@ -96,20 +96,38 @@ class AskApiTest(unittest.TestCase):
             status, data = self._post("各地区的GMV", mode="analysis")
         self.assertEqual(status, 200)
         self.assertEqual(data["mode"], "analysis")
+        self.assertTrue(data["analysis_model"])
         self.assertEqual(data["answer"], "一共有 1 行 [s1]。")
         self.assertEqual(data["evidence"], ["s1"])
         self.assertEqual(data["steps"][0]["id"], "s1")
         self.assertEqual(data["steps"][0]["rows"], [[1]])
         self.assertTrue(data["steps"][0]["ok"])
+        self.assertEqual(data["steps"][0]["warning"], "GMV 口径提醒")
         self.assertEqual(data["usage"]["completion_tokens"], 4)
 
     def test_single_mode_response_has_no_analysis_keys(self) -> None:
-        # 快路径结构不变：不传 mode 时没有 mode/steps/answer/evidence
+        # 快路径结构不变：不传 mode 时没有 mode/steps/evidence；Step 3 的 answer/conclusion 默认空
         _, data = self._post("各地区的GMV", use_llm=False)
         self.assertNotIn("mode", data)
         self.assertNotIn("steps", data)
-        self.assertNotIn("answer", data)
         self.assertNotIn("evidence", data)
+        self.assertNotIn("analysis_model", data)
+        self.assertEqual(data["answer"], "")
+        self.assertFalse(data["conclusion"])
+
+    def test_conclusion_contract(self) -> None:
+        plan = SQLPlan(
+            question="各地区的GMV", ok=True, intent="ask", engine="llm",
+            columns=["region_name", "gmv"], rows=[("华东", 1)],
+            answer="华东的 GMV 为 1。", conclusion=True,
+            conclusion_usage={"prompt_tokens": 2, "completion_tokens": 3},
+        )
+        with mock.patch("app.server.ask", return_value=plan) as ask_mock:
+            _, data = self._post("各地区的GMV", conclusion=True)
+        self.assertTrue(data["conclusion"])
+        self.assertEqual(data["answer"], "华东的 GMV 为 1。")
+        self.assertEqual(data["conclusion_usage"]["completion_tokens"], 3)
+        self.assertTrue(ask_mock.call_args.kwargs["conclusion"])
 
     def test_analysis_offline_falls_back_to_single(self) -> None:
         # 离线/规则模式没有 Planner：明确回退单 SQL，并把原因带回来，不假装分析成功

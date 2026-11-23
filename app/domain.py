@@ -155,6 +155,7 @@ class AnalysisStep:
     ok: bool = False
     skipped: bool = False  # 被澄清/越权/预算拦下，没有硬跑
     error: str = ""
+    warning: str = ""  # 口径警告（如 pay_amount 没过滤 paid）；不改变 ok，但必须进综合结论
     intent: str = ""
     engine: str = ""
     elapsed_ms: int = 0
@@ -204,3 +205,7 @@ class SQLPlan:
     analysis_error: str = ""  # 规划失败/综合失败；规划失败时回退单 SQL
     analysis_warning: str = ""
     usage: dict[str, int] = field(default_factory=dict)
+    # Step 3 单 SQL 自动结论（可选，默认关闭）：answer 复用上面的字段
+    conclusion: bool = False
+    conclusion_error: str = ""
+    conclusion_usage: dict[str, int] = field(default_factory=dict)

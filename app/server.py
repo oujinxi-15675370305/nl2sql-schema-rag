@@ -64,6 +64,7 @@ def _step_payload(step) -> dict:
         "ok": step.ok,
         "skipped": step.skipped,
         "error": step.error,
+        "warning": step.warning,
         "intent": step.intent,
         "engine": step.engine,
         "elapsed_ms": step.elapsed_ms,
@@ -90,6 +91,8 @@ def _plan_payload(plan: SQLPlan, question: str) -> dict:
         "elapsed_ms": plan.elapsed_ms,
         "intent": plan.intent,
         "reply": plan.reply,
+        "answer": plan.answer,
+        "conclusion": plan.conclusion,
         "clarify_options": plan.clarify_options,
         "engine": plan.engine,
         "attempts": plan.attempts,
@@ -105,8 +108,14 @@ def _plan_payload(plan: SQLPlan, question: str) -> dict:
                         for h in ctx.columns],
         },
     }
+    if plan.conclusion_error:
+        payload["conclusion_error"] = plan.conclusion_error
+    if plan.conclusion_usage:
+        payload["conclusion_usage"] = plan.conclusion_usage
     if plan.mode == "analysis" or plan.analysis_error:
+        from app.analysis import analysis_model  # 让页面/调用方能确认这轮用的哪个分析模型
         payload["mode"] = plan.mode
+        payload["analysis_model"] = analysis_model()
         payload["steps"] = [_step_payload(step) for step in plan.steps]
         payload["answer"] = plan.answer
         payload["evidence"] = plan.evidence
@@ -214,6 +223,7 @@ class Handler(BaseHTTPRequestHandler):
         if mode not in ("single", "analysis"):
             return self._send(*_json(
                 {"ok": False, "error": f"未知 mode：{payload.get('mode')!r}（可选 single / analysis）"}, 400))
+        conclusion = bool(payload.get("conclusion", False))
 
         # M3：前端没带 session_id 就新开一个，带回来就接着上文
         session = SESSIONS.get(str(payload.get("session_id") or "").strip() or None)
@@ -225,6 +235,7 @@ class Handler(BaseHTTPRequestHandler):
             session=session,
             role=role,
             mode=mode,
+            conclusion=conclusion,
         )
         self._send(*_json(_plan_payload(plan, question)))
 

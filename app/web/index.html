@@ -114,6 +114,16 @@
           </span>
         </label>
 
+        <label class="mode-switch" for="conclusion-toggle"
+               title="单 SQL 成功后额外调用一次模型，只根据结果写 1–3 句结论；默认关闭，不改变 SQL 结果">
+          <input type="checkbox" id="conclusion-toggle" />
+          <span class="mode-track" aria-hidden="true"></span>
+          <span class="mode-copy">
+            <strong>自动结论</strong>
+            <small>SQL 成功后多一次模型调用，只描述结果、不解释原因；默认关闭</small>
+          </span>
+        </label>
+
         <div class="samples-head"><span>试试这些</span><span class="samples-note">点击直接运行</span></div>
         <div class="samples"></div>
 

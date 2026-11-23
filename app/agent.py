@@ -141,7 +141,10 @@ def llm_sql(
         "口径与格式（必须遵守）：\n"
         "- 只输出一条 SELECT 语句（复杂问题可以用 WITH ... SELECT 的 CTE），不要解释，不要 markdown。\n"
         "- 指标口径以 schema 里给出的 metric SQL 为准。\n"
-        "- GMV/成交额/销售额一律用 SUM(o.pay_amount)，不要用 order_items.item_amount 或 quantity*unit_price。\n"
+        "- GMV/成交额/销售额的金额列只能来自已支付订单：必须用 WHERE o.status = 'paid'，"
+        "或在聚合里 SUM(CASE WHEN o.status = 'paid' THEN o.pay_amount ELSE 0 END)。\n"
+        "- 不要直接 SUM(o.pay_amount) 和退款率混在同一条未过滤 status 的查询里；"
+        "退款率按全部订单算，不要加 paid 过滤。\n"
         "- 成交额/订单数/客单价/销量/客户数只统计 o.status = 'paid'；退款率不要加这个过滤。\n"
         "- 日期列是 TEXT 'YYYY-MM-DD'；按月分组用 substr(o.order_date, 1, 7)，不要用 strftime。\n"
         "- 本月/上个月/今年/去年/最近30天用 date('now', ...) 计算，不要把 'now' 当字符串 substr：\n"
@@ -150,7 +153,12 @@ def llm_sql(
         "  今年 >= date('now','start of year')；去年 >= date('now','start of year','-1 year') 且 < date('now','start of year')；\n"
         "  最近30天 >= date('now','-30 day')；\n"
         "  只有指定月份（YYYY-MM）才用 substr(o.order_date,1,7) = 'YYYY-MM'。\n"
-        "- 只 SELECT 问题要求的维度列和指标列，不要额外列。\n"
+        "- 只 SELECT 问题要求的维度列和指标列，不要额外列：\n"
+        "  占比/比例题只输出维度列 + 占比列，不要额外输出分子、分母或中间聚合列；\n"
+        "  分组 Top-N 只输出分组列 + 对象列 + 指标列，不要额外输出 product_id 等 ID 列；\n"
+        "  排名指标必须与问题一致：销售额/GMV 用 SUM(o.pay_amount)，"
+        "不要用 item_amount、quantity 或 quantity*unit_price 代替。\n"
+        "- 问题明确指定了输出格式时严格照做；季度用 YYYY-Qn（如 2026-Q1），不要只输出月份数字。\n"
         "- 如果问题只问「有哪些 / 列出」某个维度、没有指标：用 SELECT DISTINCT 只选该维度列，"
         "不要臆造指标，也不要 GROUP BY。\n"
         "- 有指标的问题必须 SELECT 指标列（可以再带分组维度），不要只返回维度取值。\n"
@@ -354,11 +362,14 @@ def ask(
     session: Session | None = None,
     role: str = permissions.DEFAULT_ROLE,
     mode: str = "single",
+    conclusion: bool = False,
 ) -> SQLPlan:
     """AC-1.1：失败带报错重试；AC-1.4：每次尝试都要过校验；AC-1.5：max_repair=0 只跑一次。
 
     `mode="analysis"` 走有界 plan-and-execute（`app/analysis.py`）：Planner 失败或离线模式时
     回退本函数的单 SQL 快路径，并把原因放进 `analysis_error`；默认 `mode="single"`，结构不变。
+    `conclusion=True` 时，单 SQL 成功后再可选调用一次模型写 1–3 句结论（Step 3，默认关闭）；
+    结论失败只写 `conclusion_error`，不影响 SQL 的 `ok/rows`。
 
     顺序（AC-3.6）：
     **role → 按角色裁剪 catalog → session 槽位继承 → classify → 检索/build_context → 生成**。
@@ -503,5 +514,17 @@ def ask(
         feedback = message
 
     plan.engine = getattr(gen, "last_engine", "custom")
+    if conclusion and plan.intent == "ask" and plan.ok:
+        if plan.engine != "llm":
+            plan.conclusion_error = "规则 fallback 不生成自动结论"
+        elif not plan.rows:
+            plan.conclusion_error = "没有结果可总结"
+        else:
+            from app.conclusion import summarize  # 局部导入，保持 agent 的依赖关系简单
+            answer, error, usage = summarize(question, plan.columns, plan.rows)
+            plan.answer = answer
+            plan.conclusion = True
+            plan.conclusion_error = error
+            plan.conclusion_usage = usage
     plan.elapsed_ms = int((time.time() - started) * 1000)
     return plan

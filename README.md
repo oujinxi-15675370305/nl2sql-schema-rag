@@ -94,11 +94,11 @@ python -m unittest discover -s tests -v
 
 **真实模型（`deepseek-chat`，temperature 0，2026-11-24）**：单轮 **50/50**、意图 **57/57**、多轮 **21/21**、静默回退 **0**、平均约 **0.7s/条**（`--engine llm` 单次运行）。同一套检索/校验/权限链路，只把生成器换成模型。
 
-**离线基线（规则 fallback，CI 默认）**：单轮 50/50、多轮 21/21、平均约 2ms——它是确定性的回归网，不是"模型准确率"。218 个单测覆盖检索、生成、校验、修复、路由、多轮、权限、评测、hard/complex runner、分析模式、fallback 拆分、模型快照和 HTTP 契约。
+**离线基线（规则 fallback，CI 默认）**：单轮 50/50、多轮 21/21、平均约 2ms——它是确定性的回归网，不是"模型准确率"。250 个单测覆盖检索、生成、校验、修复、路由、多轮、权限、评测、hard/complex/holdout runner、分析模式、自动结论、fallback 拆分、模型快照和 HTTP 契约。
 
-**复杂问法（`--complex`，单独统计）**：13 条里 12 条可判定、1 条归因题标记为未支持；规则 **0/12**，模型 **7–8/12**（9 次运行：7/12 七次、8/12 两次；稳定的 7 条之外，#5 偶尔能写对；静默回退 0，平均约 0.9–1.2s/条）。归因题当前仍只返回一条取数 SQL，不计通过、只记为局限。
+**复杂问法（`--complex`，单独统计）**：13 条里 12 条可判定、1 条归因题标记为未支持；规则 **0/12**，模型 **11/12**（2026-11-24 prompt v3.1 去掉与题面重叠的示例后 3 次均为 11/12，只剩 #13；静默回退 0，平均约 1.1s/条）。归因题当前仍只返回一条取数 SQL，不计通过、只记为局限。
 
-**分析模式 A/B（3 条 complex，2026-11-24）**：`deepseek-chat` 平均 **4.6s**、3 条里 2 条完整；`deepseek-reasoner` 平均 **11.8s**、3 条完整；两步成功均 **6/6**，未出现假因果/假数字。默认仍是快路径 `deepseek-chat`，不先换模型；样本只有 3 条，详见下面「分析模式」。
+**分析模式 A/B（12 条 complex，2026-11-24 复核重跑）**：prompt v3.1 下 chat **26/26 步、5.98s、coverage 0.71**；flash **25/27 步、16.85s、coverage 0.63**；原始答案 [eval/analysis_ab.json](eval/analysis_ab.json)。旧 8/12、10/12 是单次人工抽样，仅历史；默认仍 chat。
 
 两个模式的分工：
 
@@ -106,8 +106,8 @@ python -m unittest discover -s tests -v
 |---|---|---|
 | 基础 50 条问数 | 50/50 | 50/50 |
 | 多轮 21 轮 | 21/21 | 21/21 |
-| 规则覆盖外 10 条 | **0/10** | **7–8/10**（多次采样；最近快照 7–8/10） |
-| 复杂问法 12 条（可判定） | **0/12** | **7–8/12**（9 次：7 分七次、8 分两次；归因题另计未支持） |
+| 规则覆盖外 10 条 | **0/10** | **8–9/10**（多次采样；最近快照 8–9/10） |
+| 复杂问法 12 条（可判定） | **0/12** | **11/12**（prompt v3.1 后 3 次一致；只剩 #13；归因题另计未支持） |
 | 静默回退 | — | 0 |
 | 平均耗时 | ~2ms | ~0.7s（复杂题约 0.9–1.2s） |
 | 跑在哪 | CI（离线）、无 key 降级 | 生产主路径、手动评测 |
@@ -138,7 +138,7 @@ python -m unittest discover -s tests -v
 | 评测集 | 规则 fallback | LLM (deepseek-chat) |
 |---|---|---|
 | 基础 50 条 | 50/50 | 50/50 |
-| 规则覆盖外 10 条 | **0/10** | **7–8/10**（多次采样；最近一批 4 次为 7–8，见 `eval/llm_result.json`） |
+| 规则覆盖外 10 条 | **0/10** | **8–9/10**（多次采样；最近一批 4 次为 8–9，见 `eval/llm_result.json`） |
 
 模型的失败也照实写：稳定的两条是 **Top-1** 被 prompt 里"排名 → LIMIT 10"带偏成 10 行、
 **上季度**被写成"最近三个月"而不是上一个日历季度；「复购客户数」在 4 次里有 1 次把 `GROUP BY`
@@ -153,7 +153,7 @@ python -m unittest discover -s tests -v
 
 ```bash
 python -m app.evals --hard                 # 规则 0/10，平均 2ms
-python -m app.evals --hard --engine llm    # 模型 7–8/10，静默回退 0
+python -m app.evals --hard --engine llm    # 模型 8–9/10，静默回退 0
 ```
 
 ## 复杂问法评测（`--complex`）
@@ -162,31 +162,38 @@ python -m app.evals --hard --engine llm    # 模型 7–8/10，静默回退 0
 
 ```bash
 python -m app.evals --complex              # 规则对照组：0/12，约 2ms
-python -m app.evals --complex --engine llm # 真实模型：7–8/12，静默回退 0，约 0.9–1.2s/条
+python -m app.evals --complex --engine llm # 真实模型：11/12，静默回退 0，约 1.1s/条
+python -m scripts.holdout_eval --repeat 3  # prompt v3.1 的 3 条 holdout 泛化检查（不进 CI）
+python -m scripts.analysis_ab --models deepseek-chat,deepseek-flash --out eval/analysis_ab.json  # A/B 单次样本，落盘后才能复核
 ```
 
-实测（`deepseek-chat`，temperature 0，2026-11-24；9 次运行：7/12 七次、8/12 两次；稳定的 7 条之外，#5 偶尔能写对；个别 SQL 写法有波动）：
+实测（`deepseek-chat`，temperature 0，2026-11-24；prompt v3.1 去掉与题面重叠的示例后 3 次 **11/12、11/12、11/12**；唯一失败是 #13，base/hard 未回退）：
 
 | # | 类别 | 问题 | 规则 | 模型 |
 |---|---|---|---|---|
 | 1 | group_top_n | 华东销售额最高的三个品类，每个品类再列出销售额前两名商品 | ✗ | ✓ |
-| 2 | multi_metric | 华东和华南的GMV、退款率对比 | ✗ | ✗ |
+| 2 | multi_metric | 华东和华南的GMV、退款率对比 | ✗ | ✓ |
 | 3 | quarter | 今年各季度的GMV和订单数（季度写成 2026-Q1） | ✗ | ✓ |
 | 4 | ratio | 华东各品类销量占华东总销量比例 | ✗ | ✓ |
-| 5 | repurchase | 各地区的复购客户数（下过至少两单的客户） | ✗ | ✗（9 次里 2 次 ✓） |
+| 5 | repurchase | 各地区的复购客户数（下过至少两单的客户） | ✗ | ✓ |
 | 6 | multi_dim | 各地区各品类的GMV | ✗ | ✓ |
 | 7 | unsupported_why | 为什么上个月GMV下降了？ | 未支持 | 未支持 |
 | 8 | window | 今年每个月的GMV和环比 | ✗ | ✓ |
-| 9 | group_top_n | 每个品牌销售额前两名商品 | ✗ | ✗ |
+| 9 | group_top_n | 每个品牌销售额前两名商品 | ✗ | ✓ |
 | 10 | multi_metric | 各品牌的GMV和订单数 | ✗ | ✓ |
-| 11 | ratio | 各地区GMV占全国比例 | ✗ | ✗ |
+| 11 | ratio | 各地区GMV占全国比例 | ✗ | ✓ |
 | 12 | multi_dim | 上个月各地区各品类的GMV | ✗ | ✓ |
-| 13 | customer_cte | GMV超过3万的客户按地区统计人数 | ✗ | ✗ |
+| 13 | customer_cte | GMV超过3万的客户按地区统计人数 | ✗ | ✗（把地区汇总当客户筛选） |
 
-以 7/12 的典型一轮看，模型的 5 条失败分两类（8/12 的那两次多通过了 #5），没有为了好看改 expected：
+prompt v3.1 后 3 次 11/12，唯一失败是 #13；没有为了好看改 expected：
 
-- **语义/粒度 3 条（7/12 那一轮）**：#2 GMV 没加 `status='paid'`，把退款订单的实付金额也算进去了；#5 多数运行把"至少两单"的聚合层级搞错——有时把 `HAVING` 套在地区分组上（变成"该地区订单数≥2"），有时按客户+地区分组返回 115 行（每行一个客户，没有聚合成地区人数），但 9 次里也有 2 次写对（先按客户聚合再按地区计数）；#13 按客户+地区分组返回 52 行，同样没有聚合成每个地区的人数。
-- **形状 2 条**：#9 多返回了 `product_id` 列、#11 多返回了 `gmv` 列（占比列名是 `gmv_ratio`），数值本身对，但违反"只 SELECT 问题要求的列"的约定；按严格结果集口径仍算失败。
+- v3.1 **移除了 prompt v3 里与 complex 题面重叠的 4 条示例**（#2/#9/#11 是原题，#3 的季度公式），只保留通用规则：占比题只输出维度+占比列，分组 Top-N 不额外带 ID/中间列，排名指标必须与问题一致（销售额用 `SUM(pay_amount)`，不用 `item_amount`/`quantity`），问题指定格式（如 `2026-Q1`）严格照做。
+- v3 的 **12/12 是开发集口径**：示例直接覆盖了 4/12 的题面/公式，不能当泛化成绩。v3.1 去示例后是 **11/12**，说明通用规则仍能过 Q2/Q4/Q9/Q11，分数回落来自去掉泄漏，不是模型退化。
+- #2 的 `paid` 口径规则保留：`SUM(pay_amount)` 必须 `WHERE status='paid'` 或 `CASE WHEN paid`；v3.1 删掉 Q2 整题示例后 Q2 仍通过。
+- #13 仍失败：模型把“地区 GMV 汇总 > 3 万”当成“客户 GMV > 3 万”再数人，返回 52 行客户明细；这是语义/粒度问题，不是 shape，留作已知失败。
+- 分析模式里 #5 的“地区级 HAVING”现在由代码判为步骤不可用（见分析模式），不会再把它当复购客户数引用；#13 仍未修。
+
+**Holdout 泛化验证（2026-11-24）**：另写 3 条没进 prompt 示例的变体（地区品牌 Top-2 / 品牌销量占比 / 退款率最低 Top-3），[scripts/holdout_eval.py](scripts/holdout_eval.py) 跑 3 次，LLM **3/3、3/3、3/3**；规则对照组 **0/3**。它不进 CI、不并入 complex，只用来检查 v3.1 是否只会那 12 条。3/3 不能证明泛化，但至少没有“示例一换就崩”。
 
 **归因题是已知局限**：`expected_unsupported: true` 的问题没有 `expected_sql`，只记录系统实际响应，**不算通过也不算 SQL 失败**。当前它仍会被路由成问数并返回一条"上个月 GMV"，没有对比和归因；这条要等分析模式（多条 SQL + 综合结论）才可能真正回答。`complex_unsupported_answered` 如实记录为 1/1。
 
@@ -206,8 +213,9 @@ python -m app.evals --complex --engine llm # 真实模型：7–8/12，静默回
 - 最多 4 步；Planner 坏 JSON / 空步骤重试 1 次，仍失败回退单 SQL，并在 `analysis_error` 说明，页面显示"分析模式未执行"。
 - 某步澄清 / 越权 / 超预算 → `skipped`，不硬跑；失败的步骤原样返回，不隐藏。
 - Synthesizer 没有可用步骤时不调模型，直接输出"当前结果不足以判断"；模型漏写失败步骤时由代码补"局限"。
-- 总预算 `ANALYSIS_TOTAL_BUDGET_S`（默认 60s，步间检查）和单次模型超时 `ANALYSIS_TIMEOUT_S`（默认 30s）可配；每步 SQL 仍受 5s 执行超时保护。
-- Planner/Synthesizer 用 `ANALYSIS_MODEL`（默认同 `LLM_MODEL`）；SQL 生成仍用 `LLM_MODEL`。reasoning 模型不传 `temperature`。
+- **步骤聚合层级检查**：复购类子问题如果把 `HAVING` 放在地区分组上（`GROUP BY region HAVING COUNT(order_id)>=2`），返回的是该地区全部客户；代码直接判该步不可用，结论只能说“不足以判断”，不会再引用错数。
+- 总预算 `ANALYSIS_TOTAL_BUDGET_S`（默认 60s，从 Planner 开始计时；耗尽后不再调综合模型）和单次模型超时 `ANALYSIS_TIMEOUT_S`（默认 30s）可配；每步 SQL 重试 `ANALYSIS_STEP_MAX_REPAIR`（默认 1，范围 0–2，低于快路径的 2 次）；每步 SQL 仍受 5s 执行超时保护。
+- Planner/Synthesizer 用 `ANALYSIS_MODEL`（默认同 `LLM_MODEL`）；SQL 生成仍用 `LLM_MODEL`。接千问等另一家 OpenAI 兼容服务时配 `ANALYSIS_BASE_URL` / `ANALYSIS_API_KEY`（留空则复用 LLM 的地址/key）。reasoning 模型不传 `temperature`。
 
 ```bash
 curl -s localhost:8000/api/ask \
@@ -216,34 +224,97 @@ curl -s localhost:8000/api/ask \
 
 响应在快路径字段之外增加 `mode / steps / answer / evidence`；每个 step 带 `question / purpose / sql / columns / rows / row_count / ok / skipped / error / engine / elapsed_ms`。分析步骤的表格 UI 只渲染前 20 行，综合器最多看 50 行（超过时 prompt 会标注"未展示行不能用于排名/汇总推断"）。
 
-### A/B：deepseek-chat vs deepseek-reasoner
+### A/B：deepseek-chat vs deepseek-flash
 
-同一套 prompt、同样 3 条 complex 题（分组 Top-N / 多指标对比 / 月度环比），各跑一次；`deepseek-chat` 用 temperature 0，reasoner 不传 temperature：
+下面 3 条是 **prompt v1** 的样本，保留作对比；Q2 的 paid 问题已在 prompt v2 修复，12 条全量见下一节。
 
-| 指标 | deepseek-chat | deepseek-reasoner |
+供应商 `/models` 当前只返回 `deepseek-flash` / `deepseek-v4-pro`；`deepseek-reasoner` 已不在列表，实测请求仍返回 200，但响应里的 `model` 是 `deepseek-flash`——之前标成 reasoner 的那轮其实就是 flash，文档按实际模型改写。
+
+同一套 prompt、同样 3 条 complex 题（分组 Top-N / 多指标对比 / 月度环比），各跑一次；`deepseek-chat` 用 temperature 0，flash 不传 temperature：
+
+| 指标 | deepseek-chat | deepseek-flash |
 |---|---|---|
-| 结论质量（人工） | 2 条完整；月度环比题只说"缺计算步骤"，没给环比 | 3 条完整；月度环比题用 `[s1]` 数据算出环比并标注缺失月份 |
+| 结论质量（人工） | 3/3 有可用结论；Q2 明说“两退款率口径不一致，不能判断” | 2/3 可用；Q2 把未过滤 `paid` 的 GMV（886055.23 / 939303.72）当完整数据，未标注 |
 | 步骤成功 | 6/6 | 6/6 |
-| 步骤失败/跳过 | 0 | 0 |
-| 平均耗时 | **4.6s** | **11.8s**（约 2.5×） |
-| prompt tokens | 2,658 | 2,735 |
-| completion tokens | 1,166 | 5,110（约 4.4×） |
-| 假因果/假数字 | 0（缺数据时明说"不足以判断"） | 0 |
+| 平均耗时 | **4.5s** | **9.4s**（约 2.1×） |
+| prompt tokens | 2,874 | 3,024 |
+| completion tokens | 1,145 | 4,253（约 3.7×） |
+| 假因果 / 未标注错数 | 0（Q2 明说不可比） | **1**（Q2 的 GMV 错数未标注） |
 
-结论：**先用 `deepseek-chat` 跑通，默认不换模型**。reasoner 在这 3 条上结论更完整，但延迟和 completion token 明显更高；样本只有 3 条，不能据此换默认，下一步应扩到 complex 全集再决策。
+结论：**不换默认模型**。flash 在月度环比题上更完整，但更慢，且这轮 Q2 产出了未标注的错数；同一条 Q2 换一次运行结果又不同（另一轮 flash 把退款率算成 0.0 但主动标注了口径不一致），说明小样本波动大。下一步应扩到 complex 全集、固定题集多次采样再决策。
 
-A/B 第一轮暴露了两个真实问题，修复后才有上表：
+补充：两列都**只替换 Planner/Synthesizer**，每条 SQL 仍由 `LLM_MODEL=deepseek-chat` 生成——这是分析模式端到端，不是快路径单 SQL。`deepseek-v4-pro` 也试了 2 题（同样只做 Planner/Synthesizer，超时放宽到 180s）：Q1 18.6s、结论正确；Q2 73s、10,217 completion tokens，仍没给出完整月度环比（还把去年 12 月写成 2024-12）。按 30s 预算 Q2 会先超时，暂不适合做默认分析模型。
 
-1. reasoner 在分组 Top-N 题上只看到 20 行预览，漏了 24 行里的目标商品，结论算错 → 综合器预览调到 50 行，并在 prompt 标注"截断后不能用于排名/汇总推断"；UI 仍只渲染 20 行。
-2. Planner 把"退款率（退款金额/订单金额或退款订单数/订单数）"写进子问题，SQL 生成选了金额口径 → Planner prompt 明确"不要写 SQL、公式或指标口径"，由执行器按 catalog 定义生成。
+千问实测（DashScope OpenAI 兼容，2026-11-24，同一 3 题，SQL 仍 chat；代码已支持单独 `ANALYSIS_BASE_URL` / `ANALYSIS_API_KEY`）：
 
-已知局限：Planner 仍可能拆得不好（chat 的月度环比题把"去年12月"写成独立步骤，却没生成 LAG 环比）；步骤 `ok=true` 只代表 SQL 执行成功，不代表业务口径正确（reasoner 第一轮退款率就是金额口径）；50 行预览之外仍可能漏数据；分析结论不能把分组 GMV 当可加事实，也不能当因果证据。
+| 分析模型 | 结论质量 | 步骤 | 平均耗时 | prompt / completion tokens |
+|---|---|---|---|---|
+| `qwen3.8-flash` | **3/3**；Q2 明说退款率口径不可比 | 6/6 | **40.5s** | 3,727 / 7,935 |
+| `qwen3.7-flash` | **2/3**；Q2 把未过滤 `paid` 的 GMV（886055/939303）当完整数据，未标注 | 6/6 | **50.4s** | 3,087 / 15,972 |
+
+`qwen3.8-flash` 是唯一做到 3/3 且没有未标注错数的非 chat 模型，但平均 40.5s、Q2 单题 55s；默认单次 30s 超时会失败，只能作为“愿意等”的可选深分析（`ANALYSIS_TIMEOUT_S` 至少 120、总预算 180–300），不能做默认。`qwen3.7-flash` 更慢且 Q2 错数未标注，不采用。
+
+### 12 条全量（Planner/Synthesizer 换模型，SQL 仍 chat）
+
+2026-11-24 把 A/B 从 3 条扩到 12 条可判定 complex，每种分析模型跑一遍，人工按“结论完整且无错数”分类；SQL 一律由 `deepseek-chat` 生成（prompt v3）。
+
+> **审核更正（2026-11-24）**：这是 **prompt v3（含与 complex 题面重叠的示例）的单次人工抽样**，且没有落盘原始答案。独立复跑发现 chat 的 **#5 曾把全部付费客户当成复购客户**（错数，28/33/27/31 vs 正确的 27/32/26/30），所以“有错数 0”不成立；步骤成功数也出现过 25/26。下表仅作历史记录，不再作为当前质量结论。
+
+| 指标 | `deepseek-chat` | `deepseek-flash` |
+|---|---|---|
+| 完整正确 | **8/12**（当次抽样） | **10/12**（当次抽样） |
+| 有错数 | **0（当次抽样；复跑发现 #5 错数）** | 0（当次抽样，未复跑） |
+| 部分/未完成 | 4（#5 复跑会错或说不够；#13 不够；#6/#12 只给部分值） | 2（#5/#13 不够） |
+| 步骤成功 | **26/26**（当次；复跑有一轮 25/26） | 23/24（#5 一步 clarify skipped） |
+| 平均耗时 | **5.9s** | **15.3s**（2.6×） |
+| prompt / completion tokens | 12,884 / **4,976** | 13,700 / **25,394**（5.1×） |
+| 自动覆盖率（只作信号） | 0.72 | 0.85 |
+
+当时的结论：prompt v3 后 flash 不再有 #9 的 `item_amount` 错数，并多完成了 #6/#12 的全量列表，达到 10/12；但延迟 2.6×、completion 5.1×，#5/#13 两边都还答不出。这个结论受单次抽样/示例泄漏限制，**只作历史**。
+
+### 复核重跑（2026-11-24，prompt v3.1）
+
+原始答案已落盘：[eval/analysis_ab.json](eval/analysis_ab.json)（逐题 answer + step SQL，48KB，无 key）。这轮只记录 raw 指标，不再把单次人工“完整/错数”分类当稳定基线：
+
+| 指标 | `deepseek-chat` | `deepseek-flash` |
+|---|---|---|
+| 步骤成功 | **26/26** | 25/27（#5 两步 skipped） |
+| 平均耗时 | **5.98s** | 16.85s |
+| prompt / completion tokens | 13,668 / **5,031** | 14,187 / **25,693** |
+| 自动覆盖率（只作信号） | 0.71 | 0.63 |
+
+从原始答案看 chat 仍更稳：C5/C13 两边都说“不够”，C6/C12 chat 只给部分值；flash 的 C8 把环比算成绝对差额、C10 的 GMV 被判口径不可用，也没有更好。**默认仍 chat**；要再做质量结论，需要先固定一套人工 rubric、多次采样，而不是看单轮 coverage。
+
+**Q2 的提示词约束有效**：在 SQL prompt 里明确“`SUM(pay_amount)` 必须 `WHERE status='paid'` 或用 `CASE WHEN paid`”；v3.1 删除了 Q2 的整题示例，只保留 paid 规则和多指标形状规则，Q2 单 SQL 仍通过。另加确定性兜底：`_sql_warning` 标出未过滤 `paid` 的 GMV，`_repurchase_aggregation_error` 标出复购题的 HAVING 层级错误；即使综合器漏看也不会静默。这样提示词负责“尽量写对”，代码负责“错了必须标出来/不可用”。
+
+A/B 第一轮暴露了两个真实问题，修复后才有上表（当时 `deepseek-reasoner` 别名实际由 flash 响应）：
+
+1. 分组 Top-N 只给综合器 20 行预览，漏了 24 行里的目标商品，结论算错 → 综合器预览调到 50 行，并在 prompt 标注“截断后不能用于排名/汇总推断”；UI 仍只渲染 20 行。
+2. Planner 把“退款率（退款金额/订单金额或退款订单数/订单数）”写进子问题，SQL 生成选了金额口径 → Planner prompt 明确“不要写 SQL、公式或指标口径”，由执行器按 catalog 定义生成。
+
+已知局限：Planner 仍可能拆错（#5 复购/#13 客户阈值这类“先按客户聚合再按地区计数”经常拆错）；#5 的地区级 HAVING 现在由代码判为步骤不可用，结论会说不够，不再引用错数；#13 仍可能把客户明细/地区汇总搞错，且客户明细 119 行超过综合器 50 行预览；chat 在 #6/#12 只给部分值（数据对，但没列全）。50 行预览之外仍可能漏数据；分析结论不能把分组 GMV 当可加事实，也不能当因果证据。千问只在 3 条上测过（3/3 但 40.5s），12 条全量因 key 到期未跑，不据此换默认。
+
+## 自动结论（Step 3，可选，默认关闭）
+
+单 SQL 成功后，显式传 `conclusion=true`（页面「自动结论」开关）会多调用一次 `LLM_MODEL`，只依据返回的 columns/rows 写 1–3 句中文结论：
+
+- 只陈述结果，**不解释原因**；没有的数字不补；结果为空/NULL 直接说空，不说“因为”；
+- 不给 schema、不允许写 SQL；结论失败只写 `conclusion_error`，**不把已经成功的 SQL 变成失败**；
+- 规则 fallback、SQL 失败、空结果都不调用模型；
+- 最多展示 50 行给结论模型，超出会标注截断，不能用未展示行做排名/汇总。
+
+```bash
+curl -s localhost:8000/api/ask \
+  -d '{"question":"各地区的GMV","conclusion":true}'
+```
+
+响应在快路径字段外增加 `answer / conclusion / conclusion_error / conclusion_usage`。实测 `deepseek-chat`：`各地区的GMV` 约 **1.7s**，结论正确；`整体客单价` 约 **1.2s**；`去年全年的GMV` 返回 NULL 时结论是“结果为空（NULL）”，没有编原因。相比纯 SQL 的 ~0.8s，多约 0.5–0.9s；页面默认关闭，不改变快路径行为。
 
 ## 页面长什么样
 
 每条结果都会标出来源：**模型生成**（主路径）、**规则 fallback**（没 key / 请求失败时的降级）、**固定 SQL 演示**（「演示修复」按钮，两条 SQL 写死，不调模型）；右上角「**跑离线基线**」跑的是离线规则基线（约 2ms，CI 用），页面不会现场调模型。配置过模型评测后，左栏会多一条「上次模型评测」，数字来自只读快照 `eval/llm_result.json`，没有就隐藏。
 
-界面是浅色工作台：左侧提问、中间结果、右侧 schema / 模型快照；窄屏自动堆叠。
+界面是浅色工作台：左侧提问、中间结果、右侧 schema / 模型快照；提问区有「分析模式」「自动结论」两个开关，默认都关闭，开启分析模式时自动结论禁用；窄屏自动堆叠。
 
 **analyst：手机号在结果行上掩码**（点图看原尺寸）
 
@@ -363,7 +434,7 @@ curl -s 'localhost:8000/api/schema?role=viewer'
 python -m app.evals --engine llm
 ```
 
-`2026-11-24`、`deepseek-chat`、temperature 0：**单轮 50/50、意图 57/57、多轮 21/21、hard 7–8/10（多次采样；最近快照 7–8/10）、静默回退 0、平均约 0.7s/条**。每条 details 都带 `engine`；`engine=rule` 表示请求失败退回了规则——这种情况 `main()` 直接退出码 1，避免把"LLM 100%"实际上是规则跑出来的成绩当真。CI 默认仍用 rule（离线、确定性）跑基础集，LLM 与 `--hard` 是手动步骤。
+`2026-11-24`、`deepseek-chat`、temperature 0：**单轮 50/50、意图 57/57、多轮 21/21、hard 8–9/10（多次采样；最近快照 8–9/10）、complex 11/12（prompt v3.1，3 次一致）、静默回退 0、平均约 0.8s/条**。每条 details 都带 `engine`；`engine=rule` 表示请求失败退回了规则——这种情况 `main()` 直接退出码 1，避免把"LLM 100%"实际上是规则跑出来的成绩当真。CI 默认仍用 rule（离线、确定性）跑基础集，LLM 与 `--hard` 是手动步骤。
 
 阈值：SPEC 门槛 85%，CI 按 90% 卡；意图命中率、多轮一致率同为 90%。CI 跑单测 + 评测（`timeout-minutes: 10`），评测 JSON 作为 artifact 上传，失败时能直接看哪条挂了。
 
@@ -387,7 +458,7 @@ python -m app.evals --threshold 0.9 --min-intent 0.9 --min-multi 0.9 --json
 
 **为什么不在页面点一次跑一次模型**：一次模型评测要 70 次生成请求（50 条单轮问数 + 20 轮多轮问数；7 条意图/澄清不生成 SQL），约 1 分钟、有成本，而且温度 0 也仍有采样波动；挂在按钮上既慢又不可重复。同类项目也都把模型评测放在 CLI/脚本里，页面只做交互查询。
 
-页面读最近一次快照：`GET /api/eval/llm/last` → `eval/llm_result.json`；有就显示「上次模型评测：deepseek-chat · 2026-11-24 · 基础 50/50 · 多轮 21/21 · hard 7–8/10 · 回退 0」，没有（或文件坏了）就隐藏。快照由脚本生成：
+页面读最近一次快照：`GET /api/eval/llm/last` → `eval/llm_result.json`；有就显示「上次模型评测：deepseek-chat · 2026-11-24 · 基础 50/50 · 多轮 21/21 · hard 8–9/10 · 回退 0」，没有（或文件坏了）就隐藏。快照由脚本生成：
 
 ```bash
 python -m scripts.record_llm_eval                 # 基础 + 多轮 + hard × 4（约 2 分钟）
@@ -398,7 +469,7 @@ python -m scripts.record_llm_eval --hard-runs 2   # 少跑几次 hard
 
 ## 公开 benchmark（BIRD / Spider）：现在只做评估，不接
 
-**结论：不接。** 现有的 hard 组已经回答了"模型是不是可有可无"（规则 0/10 vs 模型 7–8/10）；公开集是外部有效性的加分项，不是前置条件。仓库里**没有任何 BIRD/Spider 分数**，也不准备在没有真跑过的情况下写一个。
+**结论：不接。** 现有的 hard 组已经回答了"模型是不是可有可无"（规则 0/10 vs 模型 8–9/10）；公开集是外部有效性的加分项，不是前置条件。仓库里**没有任何 BIRD/Spider 分数**，也不准备在没有真跑过的情况下写一个。
 
 如果以后要接，工作量不是"半天"：
 
@@ -429,9 +500,17 @@ python -m scripts.record_llm_eval --hard-runs 2   # 少跑几次 hard
 | `LLM_BASE_URL` | OpenAI 兼容接口 | `https://api.deepseek.com/v1` |
 | `LLM_MODEL` | 快路径 SQL 生成模型 | `deepseek-chat` |
 | `ANALYSIS_MODEL` | 分析模式 Planner/Synthesizer 模型；留空则同 `LLM_MODEL` | 空 |
+| `ANALYSIS_BASE_URL` | 分析模型另一家 OpenAI 兼容地址（如千问）；留空复用 `LLM_BASE_URL` | 空 |
+| `ANALYSIS_API_KEY` | 分析模型另一家的 key；留空复用 `LLM_API_KEY`；不要提交 | 空 |
 | `ANALYSIS_TIMEOUT_S` | 分析模式单次模型调用超时（秒） | 30 |
-| `ANALYSIS_TOTAL_BUDGET_S` | 分析模式总预算（秒，步间检查） | 60 |
+| `ANALYSIS_TOTAL_BUDGET_S` | 分析模式总预算（秒，从 Planner 开始计时；耗尽后不再调综合模型） | 60 |
+| `ANALYSIS_STEP_MAX_REPAIR` | 分析模式每步 SQL 最大重试次数（0–2，低于快路径的 2） | 1 |
 | `PORT` | 服务端口 | 8000 |
+
+> 模型名以服务商 `GET {LLM_BASE_URL}/models` 实际返回为准，不要凭版本号猜。本项目实测 `deepseek-chat`（快、稳）；
+> 换模型后要重跑评测并重录 `eval/llm_result.json`；`engine=rule` 表示请求失败静默回退，这轮结果不可信。
+> 2026-11-24 实测 `deepseek-flash` 能出正确结果但复杂题约 15s，`deepseek-v4-pro` 在 30s 超时后回退，
+> `deepseek-V4.1-flash-1017` 被当前 endpoint 以 400 拒绝（不是代码限制）。
 
 数据库、向量库这些没有做成必填：演示库是 SQLite，检索是内存索引。真接 Qdrant/ES 时替换 `app/retrieval.py` 里的 `DenseIndex` 即可。
 
@@ -447,8 +526,9 @@ app/
   router.py         意图路由（五类，规则优先；槽位由调用方传入）
   session.py        多轮会话与槽位继承（保留最近 5 轮，进程内存）
   permissions.py    角色策略、catalog 裁剪、掩码、SQL 打码、审计（M4）
-  agent.py          主路径：LLM 生成、校验、执行、带报错重试、ask()；mode=analysis 入口
+  agent.py          主路径：LLM 生成、校验、执行、带报错重试、ask()；mode=analysis / conclusion 入口
   analysis.py       分析模式：Planner / Executor / Synthesizer（有界、每步复用 ask）
+  conclusion.py     Step 3 自动结论：只依据 columns/rows 写 1–3 句，默认关闭
   fallback.py       规则模板（离线降级 + CI 确定性基线，不是主路径）
   demo.py           离线演示修复用的固定 SQL（M6）
   evals.py          评测（单轮执行一致 / 多轮 / hard / complex / 失败分类 / 模型快照路径）
@@ -462,13 +542,17 @@ eval/cases.json     57 条单轮（50 问数 + 7 意图/越权）
 eval/multi_turn.json 7 个会话 × 3 轮多轮对照
 eval/hard_cases.json 规则覆盖外 10 条（`--hard`，规则 vs 模型的证据）
 eval/complex_cases.json 复杂问法 13 条（`--complex`，CTE/窗口/多指标/占比/复购，1 条归因题标记未支持）
+eval/holdout_cases.json prompt v3.1 的 3 条 holdout（手动验证泛化，不进 CI）
+eval/analysis_ab.json 分析模式 12 条 A/B 的原始答案/SQL（prompt v3.1，人工复核用；不含 key）
 eval/llm_result.json 最近一次模型评测的只读快照（页面只读它，不含 key/明细）
 scripts/seed_demo_db.py
 scripts/demo_repair.py  演示"写错列名 → 带报错改对"
 scripts/record_llm_eval.py  跑真实模型评测并写 eval/llm_result.json（不进页面/CI）
+scripts/analysis_ab.py  分析模式 12 条 A/B（单次人工抽样；`--out` 落盘；只换 Planner/Synthesizer，SQL 仍 chat；不写快照、不进 CI）
+scripts/holdout_eval.py  prompt v3.1 的 3 条 holdout 泛化检查（不进 CI、不设门槛）
 scripts/shots.py    固定截图脚本（无头 Chrome + GIF）
 docs/screenshots/   3 张截图 + 多轮 GIF
-tests/              218 个单测（含 hard/complex runner、分析模式、模型快照、HTTP 契约）
+tests/              250 个单测（含 hard/complex/holdout、分析模式、自动结论、模型快照、HTTP 契约）
 docs/decisions.md   几个取舍的记录
 docs/comparison.md  同类 NL2SQL 项目对比与复杂问题边界
 ```
@@ -476,7 +560,7 @@ docs/comparison.md  同类 NL2SQL 项目对比与复杂问题边界
 ## 已知问题
 
 - **规则 fallback 只支持单指标 + 单维度**（FIXME 在 `app/fallback.py`）。「各品牌客单价和销量对比」会退化；模型路径没有这个限制，但这组评测仍以单指标为主。
-- **规则 fallback 覆盖窄**（这正是它只配做 fallback 的原因）：时间只认上个月/本月/今年/去年/最近 30 天/具体月份；IN、HAVING、季度、占比、复购、任意 Top-N、状态分布都拼不出来，维度清单（有哪些X）也只有模型路径支持（没 key 时规则会按指标兜底，可能答非所问，`engine=rule` 会标出来）。`eval/hard_cases.json` 实测 **0/10**，`eval/complex_cases.json` 实测 **0/12**；模型分别是 7–8/10 和 7–8/12。
+- **规则 fallback 覆盖窄**（这正是它只配做 fallback 的原因）：时间只认上个月/本月/今年/去年/最近 30 天/具体月份；IN、HAVING、季度、占比、复购、任意 Top-N、状态分布都拼不出来，维度清单（有哪些X）也只有模型路径支持（没 key 时规则会按指标兜底，可能答非所问，`engine=rule` 会标出来）。`eval/hard_cases.json` 实测 **0/10**，`eval/complex_cases.json` 实测 **0/12**；模型分别是 8–9/10 和 11/12。
 - **按品类/商品拆分的 GMV 不是可加口径**：`gmv` 是整单 `pay_amount`，join `order_items` 后按维度求和会把整单金额计入每个明细行（全国 paid GMV 3.36M，按品类相加 7.88M），排名也会受影响。`eval/complex_cases.json` 的 #1/#6/#9/#10/#12 沿用这一现有口径，分组值不可相加；要可加的分摊销售额需新增明细金额指标，不能直接把 `gmv` 换成 `item_amount`。
 - **自我修复在离线模式下是空转**：`OfflineFallback` 不看 `feedback`，同一句 SQL 会重复生成；页面的「演示修复」和 `scripts/demo_repair.py` 用脚本化生成器复现"写错列名 → 改对"，真实修复要配 `LLM_API_KEY`。
 - **演示修复端点只用于展示**：`/api/demo/repair` 固定两条 SQL、不写会话、不参与评测；它证明的是时间线和重试链路，不代表模型能力。
@@ -488,11 +572,12 @@ docs/comparison.md  同类 NL2SQL 项目对比与复杂问题边界
 - **审计在进程内**（环形缓冲 100 条），重启即清空，也没有鉴权入口——demo 只做到可观测。role 同样由客户端声明（`{"role": "analyst"}`），没有认证：这是权限**策略**演示，不是账号体系。
 - **demo 只有 5 张表**：检索最多带 4 张，缩表的收敛收益仍然有限，真正收敛的是列（24 → 12）和指标（6 → 3）。
 - **列检索的稠密部分是近似**（字符 n-gram 哈希），换成真 embedding 后指标会变，现在的成绩不可直接对比。
-- **评测集仍是自己写的**：基础 57 条（6 指标 × 6 维度 31/36、多轮 7 会话 21 轮）+ hard 10 条 + complex 13 条，都有过拟合嫌疑；分析模式 A/B 目前只有 3 条样本；下一步要拿真实提问继续补。
-- **LLM 基础评测是单次采样**：`deepseek-chat` 在 temperature 0 下仍偶有波动（出现过 49/50）；hard 组多次采样为 7–8/10（最近一批 4 次为 7–8）。换模型或改 prompt 后要重跑，别把单次数字当能力上下限。
+- **评测集仍是自己写的**：基础 57 条（6 指标 × 6 维度 31/36、多轮 7 会话 21 轮）+ hard 10 条 + complex 13 条，都有过拟合嫌疑；prompt v3.1 已移除与 complex 题面重叠的示例，complex 从开发集 12/12 回落到 11/12；分析模式旧 A/B 是单次人工抽样，v3.1 已复核重跑并落盘 `eval/analysis_ab.json`，但仍是单轮样本，下一步要拿真实提问继续补。
+- **LLM 基础评测是单次采样**：`deepseek-chat` 在 temperature 0 下仍偶有波动（出现过 49/50）；hard 组多次采样为 8–9/10（最近一批 4 次为 8–9）。换模型或改 prompt 后要重跑，别把单次数字当能力上下限。
 - **模型在规则覆盖外仍有失败**：hard 组常见的失败是——「退款率最高的品类」被 prompt 的"排名 → LIMIT 10"带偏成 10 行；「上季度GMV」写成最近三个月而不是上一个日历季度；「复购客户数」偶发把 `GROUP BY` 写在外层。这些是提示词/语义理解的边界，没有为了好看去改期望 SQL。
-- **单条 SQL 的边界**：CTE / 窗口函数 / 分组 Top-N 已支持（校验器放行只读 `WITH ... SELECT`），复杂集里分组 Top-N、窗口环比、多维度都能过；但"为什么下降""归因""多步对比"这类需要多条 SQL + 综合结论的问题仍答不了——`--complex` 的归因题仍会被路由成问数并返回一条局部数据，只记为未支持，不计通过。以 7/12 的典型一轮看，复杂集失败 5 条里 3 条是语义/粒度（GMV 没过滤 paid、复购/客户阈值聚合粒度错），2 条是形状（多返回列）；#5 偶尔能写对，所以重复跑是 7–8/12；详见上一节。同类项目与差距见 [docs/comparison.md](docs/comparison.md)。
-- **分析模式是有界 MVP**：最多 4 步，Planner 只看问句、不重规划；综合器最多看 50 行，超出部分不能用于排名/汇总推断；步骤 `ok=true` 只代表 SQL 执行成功，不代表业务口径正确；默认关闭，不替代快路径。A/B 只跑了 3 条，不能当能力上下限。
+- **单条 SQL 的边界**：CTE / 窗口函数 / 分组 Top-N 已支持（校验器放行只读 `WITH ... SELECT`），复杂集里分组 Top-N、窗口环比、多维度都能过；但"为什么下降""归因""多步对比"这类需要多条 SQL + 综合结论的问题仍答不了——`--complex` 的归因题仍会被路由成问数并返回一条局部数据，只记为未支持，不计通过。prompt v3.1 去示例后复杂集 3 次 **11/12**（只剩 #13）；v3 的 12/12 含 4 条题面/公式示例，是开发集口径，不能当泛化。分析模式里 #5 的错误 HAVING 已被代码拦截，#13 仍可能被 Planner 拆错。同类项目与差距见 [docs/comparison.md](docs/comparison.md)。
+- **分析模式是有界 MVP**：最多 4 步，Planner 只看问句、不重规划；综合器最多看 50 行，超出部分不能用于排名/汇总推断；步骤 `ok=true` 只代表 SQL 执行成功，不代表业务口径正确（复购 HAVING 层级错误已单独拦截）；默认关闭，不替代快路径。2026-11-24 复核重跑（prompt v3.1，原始答案 `eval/analysis_ab.json`）chat 26/26 步、5.98s、coverage 0.71，flash 25/27 步、16.85s、coverage 0.63；旧 8/12、10/12 只作历史，不能当稳定基线。
+- **自动结论只描述结果，不做归因**：`conclusion=true` 才多调一次模型，默认关闭；最多看 50 行，结果被截断时可能概括不全；规则 fallback、空结果、SQL 失败都不调用；结论模型失败只写 `conclusion_error`，不影响 SQL 结果。它不是因果分析，也不能替代分析模式的多步对比。
 - **模型效果依赖上下文质量**：这次把 JOIN 键、表关系、指标过滤规则补进 prompt 后，同一模型从 68% 到 100%；换 schema 或指标口径时要同步维护 `catalog.json` 的 relations 和 prompt 规则。
 - **公开 benchmark 未接**：BIRD/Spider/DuSQL 只有方案评估（见上），仓库里没有它们的分数；接的话是独立的 1–2 天任务，不进 CI。
 
@@ -502,13 +587,14 @@ docs/comparison.md  同类 NL2SQL 项目对比与复杂问题边界
 - [x] 列级权限与脱敏（不同角色看不到的字段要过滤，且不进 prompt/结果）
 - [x] 评测补到 50 条 + CI 门禁 + 失败分类（检索未命中 / 语法错 / 字段不存在 / 结果不一致）+ 多轮评测
 - [x] Docker Compose、截图与 GIF
-- [x] LLM 主线化：规则 SQL 移到 `app/fallback.py`，hard 10 条把"规则 0/10 vs 模型 7–8/10"写成数字
+- [x] LLM 主线化：规则 SQL 移到 `app/fallback.py`，hard 10 条把"规则 0/10 vs 模型 8–9/10"写成数字
 - [x] 页面只跑离线基线；模型成绩读 `eval/llm_result.json`，不在点击时调模型
 - [x] BIRD/Spider/DuSQL 方案评估（结论：现在不接，理由与工作量见上）
 - [x] 放行只读 CTE / 窗口函数，支持"每个品类销售额前两名"这类分组 Top-N
-- [x] 复杂问法评测集（13 条，独立 `--complex`，规则 0/12 vs 模型 7–8/12，不进 CI）
-- [x] 分析模式 MVP（显式 `mode=analysis`，默认关闭；Planner/Executor/Synthesizer；A/B 见上）
-- [ ] 分析模式扩到 complex 全集做 A/B，再调 Planner 拆分与结论质量
+- [x] 复杂问法评测集（13 条，独立 `--complex`，规则 0/12 vs 模型 11/12，不进 CI）
+- [x] 分析模式 MVP（显式 `mode=analysis`，默认关闭；Planner/Executor/Synthesizer；A/B 历史样本见上）
+- [x] 自动结论（Step 3，显式 `conclusion=true`，默认关闭；只描述结果、不解释原因；250 单测）
+- [ ] 分析模式调优：修 Planner 的 #13 聚合层级、#6/#12 全量列表；#5 已在代码层拦截；A/B 已有 raw artifact，需固定 rubric 多次采样
 - [ ] 接 Qdrant + ES，把内存索引换掉
 
 ## License

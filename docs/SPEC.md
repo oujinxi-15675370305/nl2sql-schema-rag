@@ -131,12 +131,32 @@
   坏 JSON/空步骤重试 1 次，仍失败回退 `single` 并带 `analysis_error`；步数上限 4，超出截断。
 - **AC-7.3**：Executor 每步复用 `ask(mode="single")`，同 role、不共享 session；澄清/越权/
   预算不足标 `skipped` 不硬跑；失败步骤保留 sql/error，不隐藏；SQL 仍走校验/权限/只读/5s 超时。
+  聚合层级与子问题不一致的步骤（典型：复购题的 `HAVING` 落在地区分组、返回地区全部客户）
+  判 `ok=false`，不参与证据，避免综合器引用错数。
 - **AC-7.4**：Synthesizer 不给 schema、不允许写 SQL；结论 1–3 段且必须引用成功的 `[sN]`；
   无证据时不调模型、直接说“当前结果不足以判断”；失败步骤由代码补进“局限”；结论只做长度/
   空白/引用检查，不做 SQL 校验。
 - **AC-7.5**：默认关闭、页面有开关；模型先用 `deepseek-chat`，`ANALYSIS_MODEL` 只影响
-  Planner/Synthesizer；A/B 报告结论质量、步骤失败率、耗时与 token；不换默认模型。
-  测试不碰真实模型；基础 50/50、多轮 21/21、hard/complex 数字不得回退。
+  Planner/Synthesizer；可单独配 `ANALYSIS_BASE_URL` / `ANALYSIS_API_KEY` 接千问等另一家
+  OpenAI 兼容服务（留空复用 LLM 的地址/key）；A/B 报告结论质量、步骤失败率、耗时与 token；
+  不换默认模型。测试不碰真实模型；基础 50/50、多轮 21/21、hard/complex 数字不得回退。
+  complex 以 prompt v3.1 去示例后的 **11/12** 为干净基线；v3 的 12/12 含 4 条与题面重叠的示例，不作为回退基准。
+  A/B 旧 8/12、10/12 是单次人工抽样且无原始产物，只作历史参考；prompt v3.1 已复核重跑并落盘
+  `eval/analysis_ab.json`（chat 26/26 步、5.98s、coverage 0.71；flash 25/27 步、16.85s、coverage 0.63），
+  单轮 coverage 不作为稳定质量门槛。
+
+### M8 自动结论（Step 3，P1，默认关闭）
+
+- **AC-8.1**：`ask(..., conclusion=False)` 默认关闭；`POST /api/ask` 增加 `conclusion`
+  （默认 false）。单 SQL 成功后响应增加 `answer / conclusion / conclusion_error /
+  conclusion_usage`；不开启时 `answer=""`、`conclusion=false`。
+- **AC-8.2**：只对 `intent=ask`、`ok=true`、`engine=llm` 且有行的单 SQL 调用模型；
+  规则 fallback、空结果、SQL 失败都不调用。结论模型失败只写 `conclusion_error`，
+  不得把 SQL 的 `ok/rows/sql` 改成失败。
+- **AC-8.3**：结论 prompt 只给 columns/rows（最多 50 行，截断要标注），不给 schema、不允许写 SQL；
+  输出 1–3 句中文，只描述结果、不解释原因；空/NULL 直接说空；长度/空白检查后才展示。
+- **AC-8.4**：页面「自动结论」开关默认关闭；分析模式开启时禁用/不叠加；测试全部 mock，
+  不调真实模型；base 50/50、多轮 21/21、hard/complex 数字不得回退。
 
 ## 4. 契约（公开接口，改动需改本文件）
 
@@ -144,7 +164,7 @@
 # app/agent.py
 ask(question: str, *, catalog=None, retriever=None, generator=None,
     use_llm: bool = True, max_repair: int = 2, session=None,
-    role: str = "analyst") -> SQLPlan
+    role: str = "analyst", mode: str = "single", conclusion: bool = False) -> SQLPlan
 # M3 已加：session=None（app/session.py 的 Session）
 # M4 已加：role（analyst / viewer；未知角色抛 ValueError，HTTP 层 400）
 
@@ -166,10 +186,11 @@ SQLPlan: question, sql, ok, error, failure_stage, rows, columns, elapsed_ms,
 ```http
 POST /api/ask
   { "question": "...", "use_llm": true, "session_id": "可选，不带就新开一个",
-    "role": "analyst|viewer，默认 analyst" }
+    "role": "analyst|viewer，默认 analyst", "mode": "single|analysis，默认 single",
+    "conclusion": false }
   → { sql, ok, error, failure_stage, columns, rows, masked_columns, elapsed_ms, intent,
-      reply, clarify_options, engine, attempts, context, keywords,
-      session_id, rewritten_question, inherited_slots, role }
+      reply, answer, conclusion, conclusion_error?, conclusion_usage?, clarify_options,
+      engine, attempts, context, keywords, session_id, rewritten_question, inherited_slots, role }
   # engine: rule | llm | custom，用来确认这次真的走了模型
   # 把返回的 session_id 带回来就能接上文；不带就是单轮，行为与 M2 一致
   # 非 ask 时 context 为 null（不检索、不泄漏 schema）
@@ -214,12 +235,13 @@ GET /api/health → { ok, tables, metrics, roles }
 | M1/M2 审核修复 | ✅ 已完成 | 2026-11-13 |
 | M3 多轮追问 | ✅ 已完成 | 35 条测试（AC-3.1~3.6，含标签覆盖/客户维度回环）；顺序 `session → 槽位继承 → classify → 生成`，classify 只收槽位；会话进程内、默认 5 轮 |
 | M4 权限与脱敏 | ✅ 已完成 | 29 条权限测试 + 7 条 HTTP 契约；顺序 `role → 裁剪 catalog → 槽位 → classify → 检索/生成`；列白名单（含禁 `*`）、裸投影掩码 + 值兜底、审计；2026-11-16 审核补了两条绕过路径 |
-| M5 评测与 CI | ✅ 已完成 | 57 条单轮（50 问数 + 7 意图/越权；6 指标 × 6 维度、31/36 组合、6 类时间）+ 7 会话 21 轮多轮评测；失败分类（routed/permission/validate/field/syntax/timeout/retrieval/result/intent）汇总；CI 三门槛 90% + artifact；扩容时修了退款率二次舍入；`--engine llm` 实测 deepseek-chat 单轮 50/50、多轮 21/21、回退 0（2026-11-20）；规则覆盖外 10 条（AC-5.6）规则 0/10、模型 7–8/10（多次采样，最近快照 7–8/10） |
+| M5 评测与 CI | ✅ 已完成 | 57 条单轮（50 问数 + 7 意图/越权；6 指标 × 6 维度、31/36 组合、6 类时间）+ 7 会话 21 轮多轮评测；失败分类（routed/permission/validate/field/syntax/timeout/retrieval/result/intent）汇总；CI 三门槛 90% + artifact；扩容时修了退款率二次舍入；`--engine llm` 实测 deepseek-chat 单轮 50/50、多轮 21/21、回退 0（2026-11-20）；规则覆盖外 10 条（AC-5.6）规则 0/10、模型 8–9/10（多次采样，最近快照 8–9/10） |
 | M6 Docker + 截图/GIF | ✅ 已完成 | `docker compose up --build` 起 8000（容器内 seed、healthcheck、空 volume 补 seed）；`scripts/shots.py` 固定脚本产出 3 图 + 1 GIF；离线演示修复走 `/api/demo/repair`（脚本化生成器，不写会话、不参与评测）；180 个单测 |
 | LLM 主线化 / 规则 fallback（2026-11-20） | ✅ 已完成 | 规则 SQL 移到 `app/fallback.py`（`OfflineFallback`，离线降级 + CI 基线），`agent.py` 只留 LLM/校验/执行/重试；新增 `eval/hard_cases.json` 10 条与 `--hard` runner（单独统计、不进 CI）；README/SPEC/decisions 改成模型主线；166 测试全绿，CI 仍只跑 `--engine rule` |
 | 页面离线基线 / 模型快照（2026-11-21） | ✅ 已完成 | 按钮改「跑离线基线」；`scripts/record_llm_eval.py` 生成 `eval/llm_result.json`（只读快照），`GET /api/eval/llm/last` 有则显示「上次模型评测」、无/损坏则隐藏；接口与测试均不调模型；BIRD/Spider/DuSQL 仅方案评估、不接；180 单测 |
-| 复杂问法评测（2026-11-22） | ✅ 已完成 | 13 条（12 可判定 + 1 归因未支持），`--complex` 单独统计、不进 CI；规则 0/12、`deepseek-chat` 7–8/12（9 次：7 分七次、8 分两次）、回退 0；189 单测；分组 GMV 口径见 README |
-| 分析模式 MVP（2026-11-23） | ✅ 已完成 | `mode=analysis` 默认关闭；Planner 2–4 步 → 每步复用 `ask` → Synthesizer 引用 `[sN]`、失败补“局限”；218 单测；A/B 3 题：chat 4.6s/2 条完整、reasoner 11.8s/3 条完整，步骤均 6/6，无假因果；默认不换模型 |
+| 复杂问法评测（2026-11-22） | ✅ 已完成 | 13 条（12 可判定 + 1 归因未支持），`--complex` 单独统计、不进 CI；规则 0/12、`deepseek-chat` **11/12**（prompt v3.1 去示例后 3 次一致，只剩 #13）、回退 0；分组 GMV 口径见 README |
+| 分析模式 MVP（2026-11-23） | ✅ 已完成 | `mode=analysis` 默认关闭；Planner 2–4 步 → 每步复用 `ask` → Synthesizer 引用 `[sN]`、失败/口径警告补“局限”；250 单测；每步重试默认 1、总预算从 Planner 计时；复购错误 HAVING 判步骤不可用；prompt v3.1 复杂单 SQL 11/12，holdout 3/3×3；A/B 旧 8/12、10/12 仅历史，v3.1 复核重跑 raw：chat 26/26 步/5.98s/coverage 0.71，flash 25/27 步/16.85s/coverage 0.63（`eval/analysis_ab.json`），默认不换模型 |
+| 自动结论 Step 3（2026-11-23） | ✅ 已完成 | `conclusion=true` 显式开启、默认关闭；只对 LLM 成功单 SQL 多调一次模型；只描述结果、不解释原因；规则/空结果/失败不调；页面开关默认关；实测 1.2–1.7s；250 单测 |
 
 ## 8. 开发约定
 

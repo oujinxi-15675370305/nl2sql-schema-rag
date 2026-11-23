@@ -9,14 +9,21 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 import unittest
 from unittest import mock
 
 from app.agent import ScriptedGenerator, ask
 from app.analysis import (
     ChatResult,
+    DEFAULT_STEP_MAX_REPAIR,
     _allows_temperature,
+    _analysis_endpoint,
     _parse_json,
+    _repurchase_aggregation_error,
+    _sql_warning,
+    _step_repair,
     execute_steps,
     plan,
     run_analysis,
@@ -104,6 +111,86 @@ class PlannerTest(unittest.TestCase):
     def test_reasoning_model_skips_temperature(self) -> None:
         self.assertTrue(_allows_temperature("deepseek-chat"))
         self.assertFalse(_allows_temperature("deepseek-reasoner"))
+        self.assertFalse(_allows_temperature("deepseek-flash"))
+        self.assertFalse(_allows_temperature("deepseek-v4-pro"))
+
+
+class EndpointTest(unittest.TestCase):
+    """分析模型可以接另一家 OpenAI 兼容服务（如千问）；未配置时完全沿用 LLM 的地址/key。"""
+
+    def test_falls_back_to_llm_endpoint(self) -> None:
+        env = {"LLM_BASE_URL": "https://deepseek.example/v1", "LLM_API_KEY": "llm-key"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(_analysis_endpoint(),
+                             ("https://deepseek.example/v1", "llm-key"))
+
+    def test_analysis_endpoint_overrides(self) -> None:
+        env = {
+            "LLM_BASE_URL": "https://deepseek.example/v1", "LLM_API_KEY": "llm-key",
+            "ANALYSIS_BASE_URL": "https://dashscope.example/compatible-mode/v1",
+            "ANALYSIS_API_KEY": "qwen-key",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(_analysis_endpoint(),
+                             ("https://dashscope.example/compatible-mode/v1", "qwen-key"))
+
+    def test_missing_key_is_empty(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(_analysis_endpoint(), ("https://api.deepseek.com/v1", ""))
+
+
+class SqlWarningTest(unittest.TestCase):
+    """pay_amount 没过滤 paid 时必须有确定性警告；不能只靠综合器自己发现。"""
+
+    def test_unfiltered_pay_amount_warns(self) -> None:
+        sql = "SELECT r.region_name, SUM(o.pay_amount) FROM orders o JOIN regions r ON r.region_id = o.region_id GROUP BY r.region_name"
+        self.assertIn("未过滤", _sql_warning(sql))
+
+    def test_where_paid_does_not_warn(self) -> None:
+        sql = "SELECT SUM(o.pay_amount) FROM orders o WHERE o.status = 'paid'"
+        self.assertEqual(_sql_warning(sql), "")
+
+    def test_case_paid_does_not_warn(self) -> None:
+        sql = ("SELECT SUM(CASE WHEN o.status = 'paid' THEN o.pay_amount ELSE 0 END), "
+               "SUM(CASE WHEN o.status = 'refunded' THEN 1 ELSE 0 END) FROM orders o")
+        self.assertEqual(_sql_warning(sql), "")
+
+    def test_item_amount_does_not_warn(self) -> None:
+        self.assertEqual(_sql_warning("SELECT SUM(i.item_amount) FROM order_items i"), "")
+
+
+class RepurchaseAggregationTest(unittest.TestCase):
+    """#5 实测过的错误：HAVING 落在地区分组上，返回的是地区全部客户，不是复购客户。"""
+
+    def test_region_level_having_is_rejected(self) -> None:
+        sql = ("SELECT r.region_name, COUNT(DISTINCT o.customer_id) AS customer_count "
+               "FROM orders o JOIN regions r ON r.region_id = o.region_id "
+               "WHERE o.status = 'paid' GROUP BY r.region_name "
+               "HAVING COUNT(DISTINCT o.order_id) >= 2")
+        error = _repurchase_aggregation_error("按地区统计下单次数至少为两单的客户数", sql)
+        self.assertIn("HAVING", error)
+        self.assertIn("复购", error)
+
+    def test_customer_level_having_is_allowed(self) -> None:
+        sql = ("SELECT r.region_name, COUNT(*) AS customer_count FROM ("
+               "SELECT o.region_id, o.customer_id FROM orders o WHERE o.status = 'paid' "
+               "GROUP BY o.region_id, o.customer_id HAVING COUNT(DISTINCT o.order_id) >= 2"
+               ") t JOIN regions r ON r.region_id = t.region_id GROUP BY r.region_name")
+        self.assertEqual(_repurchase_aggregation_error("各地区复购客户数", sql), "")
+
+    def test_non_repurchase_question_is_ignored(self) -> None:
+        sql = ("SELECT r.region_name, COUNT(DISTINCT o.customer_id) FROM orders o "
+               "JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' "
+               "GROUP BY r.region_name HAVING COUNT(DISTINCT o.order_id) >= 2")
+        self.assertEqual(_repurchase_aggregation_error("各地区的GMV", sql), "")
+
+    def test_step_repair_default_and_override(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(_step_repair(), DEFAULT_STEP_MAX_REPAIR)
+        with mock.patch.dict(os.environ, {"ANALYSIS_STEP_MAX_REPAIR": "0"}, clear=True):
+            self.assertEqual(_step_repair(), 0)
+        with mock.patch.dict(os.environ, {"ANALYSIS_STEP_MAX_REPAIR": "9"}, clear=True):
+            self.assertEqual(_step_repair(), 2)
 
 
 class ExecutorTest(unittest.TestCase):
@@ -111,6 +198,7 @@ class ExecutorTest(unittest.TestCase):
         self.assertEqual(kwargs["mode"], "single")
         self.assertIsNone(kwargs["session"])
         self.assertEqual(kwargs["role"], "analyst")
+        self.assertEqual(kwargs["max_repair"], DEFAULT_STEP_MAX_REPAIR)
         if "失败" in question:
             return SQLPlan(question=question, intent="ask", ok=False,
                            error="no such column: nope", engine="llm", elapsed_ms=7)
@@ -178,6 +266,71 @@ class ExecutorTest(unittest.TestCase):
         self.assertTrue(all(s.skipped for s in steps))
         self.assertTrue(all("没有返回结果" in s.error for s in steps))
 
+    def test_step_warning_is_recorded(self) -> None:
+        def fake(question, **kwargs):
+            return SQLPlan(question=question, intent="ask", ok=True,
+                           sql="SELECT SUM(o.pay_amount) FROM orders o",
+                           columns=["gmv"], rows=[(1,)], engine="llm")
+
+        steps = execute_steps(
+            [{"question": "华东GMV"}],
+            ask_fn=fake, catalog=None, retriever=None, role="analyst",
+        )
+        self.assertIn("未过滤", steps[0].warning)
+
+    def test_region_level_repurchase_having_is_marked_invalid(self) -> None:
+        sql = ("SELECT r.region_name, COUNT(DISTINCT o.customer_id) AS customer_count "
+               "FROM orders o JOIN regions r ON r.region_id = o.region_id "
+               "WHERE o.status = 'paid' GROUP BY r.region_name "
+               "HAVING COUNT(DISTINCT o.order_id) >= 2")
+
+        def fake(question, **kwargs):
+            return SQLPlan(question=question, intent="ask", ok=True, sql=sql,
+                           columns=["region_name", "customer_count"],
+                           rows=[("华东", 28), ("华北", 33)], engine="llm")
+
+        steps = execute_steps(
+            [{"question": "按地区统计下单次数至少为两单的客户数"}],
+            ask_fn=fake, catalog=None, retriever=None, role="analyst",
+        )
+        self.assertFalse(steps[0].ok)
+        self.assertIn("HAVING", steps[0].error)
+        self.assertIn("复购", steps[0].error)
+        self.assertEqual(steps[0].sql, sql)  # SQL 仍保留，界面上能看到为什么不可用
+
+    def test_customer_level_repurchase_having_stays_ok(self) -> None:
+        sql = ("SELECT r.region_name, COUNT(*) AS customer_count FROM ("
+               "SELECT o.region_id, o.customer_id FROM orders o WHERE o.status = 'paid' "
+               "GROUP BY o.region_id, o.customer_id HAVING COUNT(DISTINCT o.order_id) >= 2"
+               ") t JOIN regions r ON r.region_id = t.region_id GROUP BY r.region_name")
+
+        def fake(question, **kwargs):
+            return SQLPlan(question=question, intent="ask", ok=True, sql=sql,
+                           columns=["region_name", "customer_count"],
+                           rows=[("华东", 27)], engine="llm")
+
+        steps = execute_steps(
+            [{"question": "按地区统计下单次数至少为两单的客户数"}],
+            ask_fn=fake, catalog=None, retriever=None, role="analyst",
+        )
+        self.assertTrue(steps[0].ok)
+        self.assertEqual(steps[0].error, "")
+
+    def test_budget_counts_from_started_at(self) -> None:
+        calls = []
+
+        def fake(question, **kwargs):
+            calls.append(question)
+            return SQLPlan(question=question, intent="ask", ok=True, engine="llm")
+
+        steps = execute_steps(
+            [{"question": "一"}, {"question": "二"}],
+            ask_fn=fake, catalog=None, retriever=None, role="analyst",
+            total_budget_s=1, started_at=time.monotonic() - 100,
+        )
+        self.assertEqual(calls, [])
+        self.assertTrue(all(s.skipped for s in steps))
+
 
 class SynthesizerTest(unittest.TestCase):
     def _steps(self) -> list[AnalysisStep]:
@@ -225,6 +378,14 @@ class SynthesizerTest(unittest.TestCase):
         answer, error, _ = synthesize("问题", self._steps(), chat_fn=chat)
         self.assertEqual(answer, "")
         self.assertIn("模型请求失败", error)
+
+    def test_warning_is_appended_even_if_model_ignores_it(self) -> None:
+        steps = [AnalysisStep(id="s1", question="GMV", ok=True, rows=[(1,)],
+                              warning="SQL 含 pay_amount 但未过滤 status='paid'")]
+        answer, error, _ = synthesize("问题", steps, chat_fn=ScriptedChat(["结论 [s1]。"]))
+        self.assertEqual(error, "")
+        self.assertIn("口径提醒", answer)
+        self.assertIn("[s1]", answer)
 
 
 class RunAnalysisTest(unittest.TestCase):
@@ -280,6 +441,20 @@ class RunAnalysisTest(unittest.TestCase):
         self.assertEqual(result.evidence, [])
         self.assertIn("无法判断", result.answer)
         self.assertIn("[s1]", result.answer)
+
+    def test_budget_exhausted_skips_steps_and_synthesis(self) -> None:
+        def fake_ask(question, **kwargs):
+            raise AssertionError("预算耗尽时不该执行步骤")
+
+        result = run_analysis(
+            "问题", role="analyst", catalog=None,
+            ask_fn=fake_ask, chat_fn=ScriptedChat([VALID_PLAN]),
+            total_budget_s=-1,
+        )
+        self.assertTrue(result.planner_ok)
+        self.assertTrue(all(step.skipped for step in result.steps))
+        self.assertEqual(result.answer, "")
+        self.assertIn("预算", result.error)
 
 
 class AgentAnalysisModeTest(unittest.TestCase):

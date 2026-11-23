@@ -12,8 +12,8 @@ from unittest import mock
 from app.agent import ScriptedGenerator, ask, execute, validate
 from app.catalog import load_catalog
 from app.domain import SchemaContext, SQLPlan
-from app.evals import (CASES, COMPLEX_CASES, HARD_CASES, LLM_RESULT, MULTI_CASES,
-                       classify_failure, main, run, run_complex, run_hard)
+from app.evals import (CASES, COMPLEX_CASES, HARD_CASES, HOLDOUT_CASES, LLM_RESULT,
+                       MULTI_CASES, classify_failure, main, run, run_complex, run_hard)
 from app.slots import DIMENSION_HINTS, extract_keywords
 
 TYPO_SQL = "SELECT COUNT(DISTINCT order_cnt) FROM orders WHERE status = 'paid' LIMIT 10"
@@ -370,6 +370,41 @@ class ComplexCaseSetTest(unittest.TestCase):
         for case in self.cases:
             if case.get("expected_unsupported"):
                 continue
+            plan = ask(case["question"], catalog=self.catalog, use_llm=False)
+            self.assertEqual(plan.intent, "ask", f"#{case['id']} 被路由成 {plan.intent}")
+
+
+class HoldoutCaseSetTest(unittest.TestCase):
+    """prompt v3 的 holdout：数据完整性自检；不并入 complex、不设门槛、不进 CI 分数。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.catalog = load_catalog()
+        cls.cases = json.loads(HOLDOUT_CASES.read_text(encoding="utf-8"))["cases"]
+
+    def test_three_unique_cases(self) -> None:
+        self.assertEqual(len(self.cases), 3)
+        ids = [case["id"] for case in self.cases]
+        self.assertEqual(len(ids), len(set(ids)))
+        for case in self.cases:
+            self.assertTrue(case["question"])
+            self.assertTrue(case["expected_sql"])
+            self.assertTrue(case["note"])
+
+    def test_expected_sql_is_valid_and_executable(self) -> None:
+        for case in self.cases:
+            ok, message = validate(case["expected_sql"], self.catalog)
+            self.assertTrue(ok, f"#{case['id']} 期望 SQL 不合法：{message}")
+            query = case["expected_sql"]
+            if "limit" not in query.lower():
+                query += " LIMIT 200"
+            try:
+                execute(query)
+            except Exception as exc:
+                self.fail(f"#{case['id']} 期望 SQL 执行失败：{exc}")
+
+    def test_every_case_routes_to_ask(self) -> None:
+        for case in self.cases:
             plan = ask(case["question"], catalog=self.catalog, use_llm=False)
             self.assertEqual(plan.intent, "ask", f"#{case['id']} 被路由成 {plan.intent}")
 

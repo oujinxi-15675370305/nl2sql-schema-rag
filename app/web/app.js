@@ -17,6 +17,7 @@ const emptyStateEl = $("#empty-state");
 const sqlBlockEl = $("#sql-block");
 const analysisEl = $("#analysis");
 const modeEl = $("#mode-analysis");
+const conclusionEl = $("#conclusion-toggle");
 
 // M3：会话 id 由服务端下发；带上它才能接上文（"那上个月呢"）
 let sessionId = "";
@@ -203,6 +204,7 @@ function renderStep(step) {
     (step.depends_on || []).length ? `依赖 ${step.depends_on.join("/")}` : "",
   ].filter(Boolean).join(" · ");
   const error = step.error ? `<div class="step-error">${escapeHtml(step.error)}</div>` : "";
+  const warning = step.warning ? `<div class="step-warning">口径警告：${escapeHtml(step.warning)}</div>` : "";
   const sql = step.sql ? `<div class="step-sql">${highlightSql(step.sql)}</div>` : "";
   const rows = (step.rows || []).slice(0, STEP_PREVIEW_ROWS);
   const table = (step.ok && rows.length)
@@ -223,7 +225,7 @@ function renderStep(step) {
       </div>
       <span class="step-badge ${state}">${label}</span>
     </div>
-    ${error}${sql}${table}
+    ${error}${warning}${sql}${table}
     ${foot.length ? `<div class="step-foot">${foot.map((x) => `<span>${escapeHtml(x)}</span>`).join("")}</div>` : ""}
   </div>`;
 }
@@ -233,6 +235,10 @@ function renderAnalysis(data) {
   tableWrap.innerHTML = "";
   answerEl.innerHTML = "";
   setEngineBadge("analysis");
+  if (data.analysis_model && engineBadgeEl) {
+    // 分析模型单独标出来：SQL 生成仍走 LLM_MODEL，两者可能不是一个模型
+    engineBadgeEl.textContent = `分析模式 · ${data.analysis_model}`;
+  }
   const steps = data.steps || [];
   const okCount = steps.filter((s) => s.ok).length;
   const parts = [];
@@ -369,6 +375,15 @@ function renderResult(data) {
     return;
   }
 
+  // Step 3：单 SQL 自动结论（只有显式开启且有 answer 时才显示）
+  if (data.answer) {
+    answerEl.innerHTML = `<div class="analysis-answer"><h3>结论</h3>` +
+      `<div class="analysis-text">${formatAnswer(data.answer)}</div></div>`;
+  } else if (data.conclusion_error) {
+    answerEl.innerHTML =
+      `<div class="analysis-note">结论未生成：${escapeHtml(data.conclusion_error)}</div>`;
+  }
+
   const ctx = data.context || {};
   renderTags($("#ctx-metrics"), ctx.metrics, "指标");
   renderTags($("#ctx-tables"), ctx.tables, "表");
@@ -380,8 +395,12 @@ function renderResult(data) {
   const masked = (data.masked_columns || []).length
     ? ` · 已掩码：${data.masked_columns.join(", ")}`
     : "";
+  const cUsage = data.conclusion_usage
+    && (data.conclusion_usage.prompt_tokens || data.conclusion_usage.completion_tokens)
+    ? ` · 结论 token ${data.conclusion_usage.prompt_tokens || 0}+${data.conclusion_usage.completion_tokens || 0}`
+    : "";
   metaEl.textContent =
-    `${data.rows.length} 行 · ${data.elapsed_ms} ms${masked}${tries > 1 ? ` · 第 ${tries} 次尝试成功` : ""}`;
+    `${data.rows.length} 行 · ${data.elapsed_ms} ms${masked}${tries > 1 ? ` · 第 ${tries} 次尝试成功` : ""}${cUsage}`;
   setState("完成", "ok");
 }
 
@@ -413,6 +432,7 @@ async function run(question) {
       role,
       ...(sessionId ? { session_id: sessionId } : {}),
       ...(modeEl && modeEl.checked ? { mode: "analysis" } : {}),
+      ...(conclusionEl && conclusionEl.checked ? { conclusion: true } : {}),
     });
     renderResult(data);
   } catch (err) {
@@ -452,6 +472,17 @@ function syncRole() {
   role = roleEl.value;
   $("#link-schema").href = `/api/schema?role=${encodeURIComponent(role)}`;
 }
+
+// 分析模式已有综合结论；两者不叠加，开启分析时禁用自动结论
+function syncModeOptions() {
+  if (!modeEl || !conclusionEl) return;
+  const analysis = modeEl.checked;
+  conclusionEl.disabled = analysis;
+  if (analysis) conclusionEl.checked = false;
+}
+
+modeEl.addEventListener("change", syncModeOptions);
+syncModeOptions();
 
 btnRun.addEventListener("click", () => run());
 

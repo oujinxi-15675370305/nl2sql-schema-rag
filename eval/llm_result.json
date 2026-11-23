@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-11-24T03:23:10+08:00",
+  "generated_at": "2026-11-21T15:40:16+08:00",
   "model": "deepseek-chat",
   "engine": "llm",
   "summary": {
@@ -10,11 +10,11 @@
     "multi_turn_match": 21,
     "multi_turn_total": 21,
     "hard_total": 10,
-    "hard_match_min": 7,
-    "hard_match_max": 8,
+    "hard_match_min": 8,
+    "hard_match_max": 9,
     "hard_samples": 4,
     "fallbacks": 0,
-    "avg_ms": 705,
-    "hard_avg_ms": 777
+    "avg_ms": 826,
+    "hard_avg_ms": 1025
   }
 }

@@ -1,0 +1,26 @@
+{
+  "note": "prompt v3.1 的 holdout：3 条没写进 SQL prompt 示例的问法变体，只做手动验证，不并入 complex、不进 CI、不设门槛。expected_sql 手写并过 validate + execute。",
+  "cases": [
+    {
+      "id": 1,
+      "question": "每个地区销售额最高的两个品牌",
+      "category": "group_top_n",
+      "expected_sql": "WITH ranked AS (SELECT r.region_name, p.brand, SUM(o.pay_amount) AS gmv, ROW_NUMBER() OVER (PARTITION BY r.region_name ORDER BY SUM(o.pay_amount) DESC) AS rn FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' GROUP BY r.region_name, p.brand) SELECT region_name, brand, ROUND(gmv, 2) AS gmv FROM ranked WHERE rn <= 2 ORDER BY region_name, gmv DESC",
+      "note": "分组对象从商品换成品牌、分组维度从品牌换成地区；未在 prompt 示例里出现过"
+    },
+    {
+      "id": 2,
+      "question": "华东各品牌的销量占华东总销量比例",
+      "category": "ratio",
+      "expected_sql": "SELECT p.brand, ROUND(SUM(i.quantity) * 1.0 / SUM(SUM(i.quantity)) OVER (), 4) AS share FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' AND r.region_name = '华东' GROUP BY p.brand ORDER BY share DESC",
+      "note": "把 prompt 的“地区 GMV 占比”换成“品牌销量占比”；只应输出 brand + share"
+    },
+    {
+      "id": 3,
+      "question": "退款率最低的三个品类",
+      "category": "top_n_metric",
+      "expected_sql": "SELECT p.category, ROUND(SUM(CASE WHEN o.status = 'refunded' THEN 1 ELSE 0 END) * 1.0 / COUNT(DISTINCT o.order_id), 4) AS refund_rate FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id GROUP BY p.category ORDER BY refund_rate ASC LIMIT 3",
+      "note": "Top-N 的指标从 GMV 换成退款率，且方向是升序；prompt 只给了销售额 Top-N 示例"
+    }
+  ]
+}

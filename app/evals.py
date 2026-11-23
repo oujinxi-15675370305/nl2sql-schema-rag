@@ -32,6 +32,7 @@ CASES = ROOT / "eval" / "cases.json"
 MULTI_CASES = ROOT / "eval" / "multi_turn.json"
 HARD_CASES = ROOT / "eval" / "hard_cases.json"
 COMPLEX_CASES = ROOT / "eval" / "complex_cases.json"
+HOLDOUT_CASES = ROOT / "eval" / "holdout_cases.json"
 # 最近一次模型评测的只读快照：由 scripts/record_llm_eval.py 跑完写入，
 # 页面只读它（GET /api/eval/llm/last），不会现场调模型。
 LLM_RESULT = ROOT / "eval" / "llm_result.json"
