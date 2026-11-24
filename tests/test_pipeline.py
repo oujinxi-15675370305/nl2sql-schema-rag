@@ -8,6 +8,7 @@ from unittest import mock
 
 from app.agent import (
     LLMGenerator,
+    MAX_CONTEXT_TABLES,
     QueryTimeout,
     ScriptedGenerator,
     _shape_feedback,
@@ -302,6 +303,18 @@ class PromptContextTest(unittest.TestCase):
         repurchase = self.catalog.instructions["repurchase"]
         self.assertIn("order_items", repurchase)
         self.assertIn("重复计入", repurchase)
+
+    def test_repurchase_multidim_prunes_customers(self) -> None:
+        ctx, _ = build_context("复购客户按地区和品类统计GMV和客户数",
+                               self.catalog, self.retriever)
+        keys = [h.key for h in ctx.tables]
+        self.assertIn("repurchase_customers", keys)
+        self.assertNotIn("customers", keys)
+        self.assertLessEqual(len(keys), MAX_CONTEXT_TABLES)
+        # 明确要客户名时不能裁
+        named, _ = build_context("复购客户中GMV前10的客户名",
+                                 self.catalog, self.retriever)
+        self.assertIn("customers", [h.key for h in named.tables])
 
     def test_repurchase_table_only_for_repurchase_queries(self) -> None:
         normal, _ = build_context("有多少客户", self.catalog, self.retriever)

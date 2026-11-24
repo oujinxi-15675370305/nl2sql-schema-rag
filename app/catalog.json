@@ -9,7 +9,7 @@
   ],
   "instructions": {
     "share": "本次是份额/占比问题：分子和分母必须同源。品牌/品类销售额用可加的行级口径（SUM(i.item_amount) 或按明细分摊整单金额），地区总额也用同一口径；不要用整单 pay_amount 当分母去配 item_amount 分子。",
-    "repurchase": "复购客户可以直接查 repurchase_customers（customer_id, region_id, order_count），用客户所属地区，不要按订单地区拆客户。这张表只有客户/地区/订单数：按品类/品牌/商品拆要回 orders + order_items + products 明细聚合；按 GMV/金额阈值筛只用 orders 的整单 pay_amount（按 customer_id 聚合后 HAVING），不要 join order_items——整单金额会被明细行重复计入。"
+    "repurchase": "复购客户可以直接查 repurchase_customers（customer_id, region_id, order_count），用客户所属地区，不要按订单地区拆客户。这张表只有客户/地区/订单数：按品类/品牌/商品拆要回 orders + order_items + products 明细聚合；按 GMV/金额阈值筛只用 orders 的整单 pay_amount（按 customer_id 聚合后 HAVING），不要 join order_items——整单金额会被明细行重复计入。复购客户数直接 COUNT(DISTINCT repurchase_customers.customer_id)，不要为了 customer_count 指标强行 join customers。"
   },
   "tables": [
     {

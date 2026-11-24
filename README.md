@@ -94,7 +94,7 @@ python -m unittest discover -s tests -v
 
 **真实模型（`deepseek-chat`，temperature 0，2026-11-24）**：单轮 **50/50**、意图 **57/57**、多轮 **21/21**、静默回退 **0**、平均约 **0.7s/条**（`--engine llm` 单次运行）。同一套检索/校验/权限链路，只把生成器换成模型。
 
-**离线基线（规则 fallback，CI 默认）**：单轮 50/50、多轮 21/21、平均约 2ms——它是确定性的回归网，不是"模型准确率"。280 个单测覆盖检索、生成、校验、修复、路由、多轮、权限、评测、hard/complex/holdout runner、分析模式、自动结论、fallback 拆分、模型快照和 HTTP 契约。
+**离线基线（规则 fallback，CI 默认）**：单轮 50/50、多轮 21/21、平均约 2ms——它是确定性的回归网，不是"模型准确率"。282 个单测覆盖检索、生成、校验、修复、路由、多轮、权限、评测、hard/complex/holdout runner、分析模式、自动结论、fallback 拆分、模型快照和 HTTP 契约。
 
 **复杂问法（`--complex`，单独统计）**：13 条里 12 条可判定、1 条归因题标记为未支持；规则 **0/12**，模型 **12/12**（阈值客户规则后曾 5 次全过；加入语义层/形状守卫后最新 3 次为 12/12、11/12、12/12，C9 偶发；**仍不当硬门槛**；静默回退 0，平均约 1.3s/条）。归因题当前仍只返回一条取数 SQL，不计通过、只记为局限。
 
@@ -312,10 +312,12 @@ A/B 第一轮暴露了两个真实问题，修复后才有上表（当时 `deeps
 
 - 指标增加 `additive / grain / warning`：如 `gmv` 是 order 粒度、可加，但按品牌/品类拆分需行级分摊；`aov/refund_rate/customer_count` 标为不可加。
 - 新增 `repurchase_customers` 语义表（客户所属地区 + 已支付订单数），只在“复购/回头客/下过至少两单/买过两次”这类问题里检索；普通“有多少客户”不会被它污染。prompt 里那句“可以直接查 `repurchase_customers`”只在**该表真的进了上下文**时才拼出来——不能让模型看到 DDL 里没有的表名。这张表只有客户/地区/订单数：按品类/品牌/商品拆要回 `orders + order_items + products` 明细聚合；按 GMV/金额阈值筛只用 `orders` 的整单 `pay_amount`（按客户聚合后 HAVING），**不要 join `order_items`**——整单金额会被明细行重复计入。
+- 上下文表数：4 是软上限，6 是硬上限。复购+多维且用户没要客户名/名单时，裁掉冗余的 `customers`，客户数直接用 `repurchase_customers.customer_id`，典型 6 张表降到 5 张。
 - 分组 Top-N 增加确定性形状守卫：问题要求“每个分组前 N”但 SQL 只有全局 `LIMIT` 时，按一次校验失败重写（C9 的回归由此修复）。“前 3 个月 / 前 10 个月 / 前 180 天”是时间范围不是 Top-N，守卫不干预（旧正则会把它误判成“每个分组前 N”，把“各品类前 10 个月的销量”改成“每月前 10 名品类”）。
 - 执行约束走独立通道：`ask(hint=...)` → `SchemaContext.instructions` → prompt 里单独一段，**不拼进问题文本**。拼进问题会让 `extract_keywords`、检索和形状守卫都看到提示词（实测会多抽一个维度、把指标从 `order_count` 换成 `refund_rate`）。
 - 占比/复购的文本判定集中到 `app/semantics.py`（`is_share_question` / `is_repurchase_question`），检索过滤、份额口径、复购聚合层级守卫共用同一份正则，不再各写一套。
 - 份额/复购的提示文案移到 `catalog.json` 的 `instructions`：`agent` 和 `analysis` 共用同一份，改口径不需要改代码；catalog 缺失时退回 `app/semantics.py` 的默认文案。
+- 同一条执行约束只渲染一次：子问题文本自带“占比”时，analysis 的 hint 与条件规则不再重复同一段口径。
 - **Planner 契约字段（`metric/dimensions/grain/output_columns`）已删除**：Planner prompt 不要求它们（实测强制会改变拆步、chat A/B 从 1.00 掉到 0.69），真实规划器从不输出，留着只产生死代码和“只有测试会走到”的分支。口径正确性改由确定性守卫承担。
 - 失败重规划：**所有步骤都不可用**时带失败反馈重规划一次；只有第二次成功步骤更多才替换（避免白烧一次模型）。剩余预算不足一次模型调用时不重规划，重规划那一轮也给综合阶段预留时间——不能把综合预算吃光、把“有结论但带局限”退化成“没有结论”。
 - 确定性占比守卫：占比/份额题如果 SQL 没有除法，按一次校验失败重写，要求输出分子/分母的比值列，而不是只返回原始指标。
@@ -584,7 +586,7 @@ scripts/analysis_ab.py  分析模式 12 条 A/B（单次人工抽样；`--out` �
 scripts/holdout_eval.py  prompt v3.1 的 3 条 holdout 泛化检查（不进 CI、不设门槛）
 scripts/shots.py    固定截图脚本（无头 Chrome + GIF）
 docs/screenshots/   3 张截图 + 多轮 GIF
-tests/              280 个单测（含 hard/complex/holdout、分析模式、自动结论、A/B 覆盖率、模型快照、HTTP 契约）
+tests/              282 个单测（含 hard/complex/holdout、分析模式、自动结论、A/B 覆盖率、模型快照、HTTP 契约）
 docs/decisions.md   几个取舍的记录
 docs/comparison.md  同类 NL2SQL 项目对比与复杂问题边界
 ```
@@ -625,7 +627,7 @@ docs/comparison.md  同类 NL2SQL 项目对比与复杂问题边界
 - [x] 放行只读 CTE / 窗口函数，支持"每个品类销售额前两名"这类分组 Top-N
 - [x] 复杂问法评测集（13 条，独立 `--complex`，规则 0/12 vs 模型最新 3 次 12/11/12（C9 偶发；不当硬门槛），不进 CI）
 - [x] 分析模式 MVP（显式 `mode=analysis`，默认关闭；Planner/Executor/Synthesizer；A/B 历史样本见上）
-- [x] 自动结论（Step 3，显式 `conclusion=true`，默认关闭；只描述结果、不解释原因；280 单测）
+- [x] 自动结论（Step 3，显式 `conclusion=true`，默认关闭；只描述结果、不解释原因；282 单测）
 - [ ] 分析模式调优：修 Planner 的 #13 聚合层级、#6/#12 全量列表；#5 已在代码层拦截；A/B 已有 raw artifact，需固定 rubric 多次采样
 - [ ] 接 Qdrant + ES，把内存索引换掉
 

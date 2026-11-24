@@ -33,6 +33,8 @@ from app.slots import extract_keywords
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = ROOT / "data" / "demo.sqlite"
 QUERY_TIMEOUT_S = 5.0  # 单条 SQL 的执行预算，超了就让 sqlite 中断
+SOFT_TABLE_LIMIT = 4  # 检索补表时的软上限；复购+多维允许到 6
+MAX_CONTEXT_TABLES = 6
 
 # ---------- 上下文 ----------
 def _required_tables(catalog: Catalog, slots: dict) -> list[str]:
@@ -85,12 +87,19 @@ def build_context(
         # 仍要过 catalog.table()：表不在当前 catalog 里时不能把名字塞进 ctx，
         # 否则 prompt 会提到 DDL 里没有的表（AC-9.8 修的就是这个幻觉）。
         required = list(dict.fromkeys([*required, "repurchase_customers"]))
+    # 复购表已有 customer_id，多维度聚合时 customers 往往只是被 customer_count
+    # 指标连带进来；用户没要客户名/名单时裁掉，少一张表，避免 5–6 张表挤 prompt。
+    if (is_repurchase_question(question)
+            and not re.search(r"客户名|客户名称|名单|姓名", question)):
+        required = [name for name in required if name != "customers"]
+        tables = [h for h in tables if h.key != "customers"]
+        columns = [h for h in columns if h.payload.get("table") != "customers"]
     held = {h.key for h in tables}
     for name in required:
         if name in held:
             continue
-        # 补表时优先挤掉得分最低、且不在必需列表里的表，保持最多 4 张
-        if len(tables) >= 4:
+        # 补表时优先挤掉得分最低、且不在必需列表里的表；4 是软上限
+        if len(tables) >= SOFT_TABLE_LIMIT:
             droppable = [(i, h.score) for i, h in enumerate(tables) if h.key not in required]
             if droppable:
                 drop_index = min(droppable, key=lambda item: item[1])[0]
@@ -99,6 +108,13 @@ def build_context(
         tables.append(Hit(kind="table", key=name, score=0.0,
                           payload={"comment": table.comment if table else ""}))
         held.add(name)
+    # 硬上限 6：只在还有非必需表时裁，必需表全保留
+    while len(tables) > MAX_CONTEXT_TABLES:
+        droppable = [(i, h.score) for i, h in enumerate(tables) if h.key not in required]
+        if not droppable:
+            break
+        drop_index = min(droppable, key=lambda item: item[1])[0]
+        tables.pop(drop_index)
     ctx = SchemaContext(metrics=metrics, tables=tables, columns=columns)
     # 关键词命中的指标置顶
     if slots["metric"]:
@@ -171,6 +187,12 @@ def _instructions_block(ctx: SchemaContext) -> str:
     return "执行约束（只影响 SQL 生成，不是用户问题的一部分）：\n" + "\n".join(lines) + "\n\n"
 
 
+def _instruction_present(ctx: SchemaContext, text: str) -> bool:
+    """同一条执行约束只出现一次：子问题自带“占比”时，analysis hint 和条件规则会撞车。"""
+    wanted = " ".join(text.split())
+    return any(" ".join(item.split()) == wanted for item in ctx.instructions if item)
+
+
 def _conditional_rules(question: str, ctx: SchemaContext, catalog: Catalog | None = None) -> str:
     """按“本次上下文里真实存在的东西”拼口径规则；不存在的表/场景一个字都不提。
 
@@ -180,11 +202,15 @@ def _conditional_rules(question: str, ctx: SchemaContext, catalog: Catalog | Non
     """
     rules: list[str] = []
     if is_share_question(question):
-        text = catalog.instructions.get("share", DEFAULT_SHARE_INSTRUCTION) if catalog else DEFAULT_SHARE_INSTRUCTION
-        rules.append(f"- {text}\n")
+        text = (catalog.instructions.get("share", DEFAULT_SHARE_INSTRUCTION)
+                if catalog else DEFAULT_SHARE_INSTRUCTION)
+        if not _instruction_present(ctx, text):
+            rules.append(f"- {text}\n")
     if "repurchase_customers" in ctx.table_names():
-        text = catalog.instructions.get("repurchase", DEFAULT_REPURCHASE_INSTRUCTION) if catalog else DEFAULT_REPURCHASE_INSTRUCTION
-        rules.append(f"- {text}\n")
+        text = (catalog.instructions.get("repurchase", DEFAULT_REPURCHASE_INSTRUCTION)
+                if catalog else DEFAULT_REPURCHASE_INSTRUCTION)
+        if not _instruction_present(ctx, text):
+            rules.append(f"- {text}\n")
     return "".join(rules)
 
 

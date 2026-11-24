@@ -721,6 +721,18 @@ class SemanticContractTest(unittest.TestCase):
         self.assertIn("份额/占比", _conditional_rules("各地区销量占全国比例", without))
         self.assertNotIn("份额/占比", _conditional_rules("各地区的GMV", without))
 
+    def test_conditional_rules_dedupe_share_hint(self) -> None:
+        from app.agent import _conditional_rules
+        from app.domain import SchemaContext
+        from app.semantics import DEFAULT_SHARE_INSTRUCTION
+
+        ctx = SchemaContext(instructions=(DEFAULT_SHARE_INSTRUCTION,))
+        self.assertNotIn(DEFAULT_SHARE_INSTRUCTION,
+                         _conditional_rules("各地区销量占全国比例", ctx, self.catalog))
+        # 没有 hint 时仍然要补规则
+        self.assertIn(DEFAULT_SHARE_INSTRUCTION,
+                      _conditional_rules("各地区销量占全国比例", SchemaContext(), self.catalog))
+
     def test_replans_only_when_no_step_is_usable(self) -> None:
         from app.analysis import _needs_replan
 
