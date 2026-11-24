@@ -94,7 +94,7 @@ python -m unittest discover -s tests -v
 
 **真实模型（`deepseek-chat`，temperature 0，2026-11-24）**：单轮 **50/50**、意图 **57/57**、多轮 **21/21**、静默回退 **0**、平均约 **0.7s/条**（`--engine llm` 单次运行）。同一套检索/校验/权限链路，只把生成器换成模型。
 
-**离线基线（规则 fallback，CI 默认）**：单轮 50/50、多轮 21/21、平均约 2ms——它是确定性的回归网，不是"模型准确率"。282 个单测覆盖检索、生成、校验、修复、路由、多轮、权限、评测、hard/complex/holdout runner、分析模式、自动结论、fallback 拆分、模型快照和 HTTP 契约。
+**离线基线（规则 fallback，CI 默认）**：单轮 50/50、多轮 21/21、平均约 2ms——它是确定性的回归网，不是"模型准确率"。288 个单测覆盖检索、生成、校验、修复、路由、多轮、权限、评测、hard/complex/holdout runner、分析模式、自动结论、fallback 拆分、模型快照和 HTTP 契约。
 
 **复杂问法（`--complex`，单独统计）**：13 条里 12 条可判定、1 条归因题标记为未支持；规则 **0/12**，模型 **12/12**（阈值客户规则后曾 5 次全过；加入语义层/形状守卫后最新 3 次为 12/12、11/12、12/12，C9 偶发；**仍不当硬门槛**；静默回退 0，平均约 1.3s/条）。归因题当前仍只返回一条取数 SQL，不计通过、只记为局限。
 
@@ -501,28 +501,53 @@ python -m scripts.record_llm_eval --hard-runs 2   # 少跑几次 hard
 
 脚本只从 `run()` / `run_hard()` 的汇总里取字段，`details` / `multi_turn_details` 全部丢掉；静默回退 >0 或 hard 期望 SQL 自身报错时直接失败、不写文件。artifact 里只有模型名、日期和汇总，没有任何 key。页面加载和单测都只读这个文件，不会触发模型调用。
 
-## 公开 benchmark（BIRD / Spider）：现在只做评估，不接
+## 公开 benchmark（BIRD Mini-Dev）：独立 harness，已做 fresh holdout
 
-**结论：不接。** 现有的 hard 组已经回答了"模型是不是可有可无"（规则 0/10 vs 模型 8–9/10）；公开集是外部有效性的加分项，不是前置条件。仓库里**没有任何 BIRD/Spider 分数**，也不准备在没有真跑过的情况下写一个。
+**干净结果：BIRD Mini-Dev SQLite，fresh holdout 50 题（seed `20261127`，排除之前跑过的 75 题），`deepseek-chat`：**
 
-如果以后要接，工作量不是"半天"：
+- **官方 BIRD EX：24/50（48%）**
+- strict（列数 + 行多重集）：23/50（46%）
+- 1 题 SQL 执行失败，gold 失败 0；2 题触发执行重试，其中 1 题救回
+- 平均 1.08s/题
 
-| 数据集 | 形态 | 建议抽样 | 粗估 |
-|---|---|---|---|
-| Spider 1.0 dev | 1034 题，SQLite，schema 简单 | 100–200 题 | ~1 天 |
-| BIRD mini-dev | 真实脏数据 + evidence，难度更高 | 100–200 题 | ~1–1.5 天 |
-| DuSQL | 中文原生；官方只有 schema/content JSON，要自己建 201 个库、修 gold SQL | 100–200 题 | ~1–2 天 |
+**这轮 1+2+3 优化没有带来净提升。** 早期 50 题 strict 27/50 是旧口径、旧 harness，和 fresh holdout 不可直接比；在 25 题 dev 上做 A/B：带数据库描述 13/25、不带 14/25，描述没有净收益，所以不要把它写成“优化后 62%–70%”。
 
-接的话必须遵守（否则分数不可信）：
+### 怎么跑
 
-1. **独立 `benchmarks/`**：不并进 `app/evals.py` 的题库，也不进 CI；benchmark 是手动/夜间任务。
-2. **通用 schema 模式**：只给表/列/外键，不给 `catalog.json` 里的业务指标口径和 `METRIC_SQL`；否则 prompt 会拿业务定义去套公开库。
-3. **关掉自动 `LIMIT`**：产品里的 `execute(max_rows=200)` 和期望 SQL 的 `LIMIT 200` 会截断 gold 结果，benchmark 要直连只读连接执行。
-4. **严格 / 宽松两种 EX 都报**（本项目的两种口径）：严格 = 列数一致 + 行集合一致；宽松 = 忽略列顺序/列选择差异，只比对是否覆盖 gold 行。只报严格会低估，只报宽松会虚高。
-5. **打乱题目**：有些集按模板排序，取前 N 条会虚高（有项目实测过 70% → 40% 的差距）；固定 seed 并写进报告。
-6. **不要用测试题调 prompt 后再报同一批题**，留一部分不看；公开集通常明显低于自建集，这很正常，把限制写清楚。
+```bash
+# 数据约 800MB，不提交仓库；详见 benchmarks/README.md
+python -m benchmarks.bird_sqlite --limit 50 --seed 20261127 \
+  --exclude benchmarks/results/bird_mini_dev.json \
+  --exclude benchmarks/results/bird_dev.json
+```
 
-**不并进 CI**：CI 只跑离线规则回归（`--engine rule`，10 分钟超时），公开集是手动/夜间任务。
+产物：`benchmarks/results/bird_holdout.json`（summary + 每题 SQL/结果/错误）。
+
+### 口径
+
+- **official**：BIRD 官方 EX，`set(predicted_res) == set(ground_truth_res)`；
+- **strict**：列数相同，行多重集完全一致（忽略行顺序，浮点 round 6 位）；
+- **loose**：列数相同，行数相同，忽略列顺序后的值多重集一致；
+- gold SQL 执行失败单独计数，不算通过；
+- 数据库以 `mode=ro` + `query_only` 打开，只接受 SELECT/WITH，30s 超时；
+- 执行错误默认重试 1 次；数据库描述/值样例默认拼入 prompt，可用 `--no-descriptions` 关闭。
+
+### 这次失败分布
+
+- 50 题里 24 官方通过、26 未通过；
+- 典型失败仍是多表 JOIN、列选错、聚合粒度/日期口径、脏值写法；
+- 描述/重试只救了少数题，说明当前瓶颈不是“再多给一点说明”就能解决。
+
+### 边界
+
+1. **独立 `benchmarks/`**：不并进 `app/evals.py`，不进 CI，不在页面跑。
+2. **通用 schema 模式**：只给表/列/外键和 BIRD 描述，不给 demo 的业务指标口径。
+3. **不自动 LIMIT**：直连只读连接，避免 `execute(max_rows=200)` 截断 gold。
+4. **固定 seed、写样本量**：50 题是 fresh holdout，不是全量 500；不要只报百分比。
+5. **不要调完 prompt 再报同一批题**；这次 dev 与 holdout 已分开，holdout 只跑了一次。
+6. 4/5（输出形状、值大小写规范化）未直接上 holdout；dev 证据不足，先不做。
+
+Spider / DuSQL 仍未接；BIRD 先保留一个诚实的 fresh holdout 区间。
 
 ## 配置
 
@@ -584,9 +609,11 @@ scripts/demo_repair.py  演示"写错列名 → 带报错改对"
 scripts/record_llm_eval.py  跑真实模型评测并写 eval/llm_result.json（不进页面/CI）
 scripts/analysis_ab.py  分析模式 12 条 A/B（单次人工抽样；`--out` 落盘；只换 Planner/Synthesizer，SQL 仍 chat；不写快照、不进 CI）
 scripts/holdout_eval.py  prompt v3.1 的 3 条 holdout 泛化检查（不进 CI、不设门槛）
+benchmarks/bird_sqlite.py  BIRD Mini-Dev SQLite 独立评测（fresh holdout 50 题 24/50 官方 EX，不进 CI）
+benchmarks/results/bird_mini_dev.json  BIRD 50 题原始 SQL/结果/汇总
 scripts/shots.py    固定截图脚本（无头 Chrome + GIF）
 docs/screenshots/   3 张截图 + 多轮 GIF
-tests/              282 个单测（含 hard/complex/holdout、分析模式、自动结论、A/B 覆盖率、模型快照、HTTP 契约）
+tests/              288 个单测（含 hard/complex/holdout、分析模式、自动结论、A/B 覆盖率、模型快照、HTTP 契约）
 docs/decisions.md   几个取舍的记录
 docs/comparison.md  同类 NL2SQL 项目对比与复杂问题边界
 ```
@@ -613,7 +640,7 @@ docs/comparison.md  同类 NL2SQL 项目对比与复杂问题边界
 - **分析模式是有界 MVP**：最多 4 步，Planner 只看问句、不重规划（“所有步骤都不可用”时最多重规划一次）；综合器最多看 50 行，超出部分不能用于排名/汇总推断；步骤 `ok=true` 只代表 SQL 执行成功，不代表业务口径正确（复购 HAVING 层级错误已单独拦截）；默认关闭，不替代快路径。2026-11-24 复核重跑（语义层/形状守卫）chat 26/26 步、5.98s、coverage 1.00，flash 25/26 步、19.2s、coverage 0.88；清理后（删契约 + 独立 hint 通道）两轮 chat 26/26 & 25/26 步、coverage 0.94 & 0.92，flash 24/25 & 25/26 步、coverage 0.92 & 0.75；原始答案 `eval/analysis_ab.json`；旧 8/12、10/12 只作历史，单轮 coverage 不能当稳定基线。
 - **自动结论只描述结果，不做归因**：`conclusion=true` 才多调一次模型，默认关闭；最多看 50 行，结果被截断时可能概括不全；规则 fallback、空结果、SQL 失败都不调用；结论模型失败只写 `conclusion_error`，不影响 SQL 结果；多轮用改写后的自包含问句，`conclusion` 非布尔 400，分析模式不叠加。代码只做长度/空白检查，1–3 句/不解释原因靠 prompt + 人工验收。它不是因果分析，也不能替代分析模式的多步对比。
 - **模型效果依赖上下文质量**：这次把 JOIN 键、表关系、指标过滤规则补进 prompt 后，同一模型从 68% 到 100%；换 schema 或指标口径时要同步维护 `catalog.json` 的 relations 和 prompt 规则。
-- **公开 benchmark 未接**：BIRD/Spider/DuSQL 只有方案评估（见上），仓库里没有它们的分数；接的话是独立的 1–2 天任务，不进 CI。
+- **公开 benchmark：BIRD Mini-Dev 已接独立 harness**：fresh holdout 50 题，官方 EX **24/50（48%）**，1 题 SQL 执行失败；早期 50 题 27/50 是旧口径/旧 harness，不可直接比。不是官方 leaderboard，Spider/DuSQL 仍未接。公开集是外部有效性，不会提升模型本身。
 
 ## 下一步
 
@@ -623,11 +650,11 @@ docs/comparison.md  同类 NL2SQL 项目对比与复杂问题边界
 - [x] Docker Compose、截图与 GIF
 - [x] LLM 主线化：规则 SQL 移到 `app/fallback.py`，hard 10 条把"规则 0/10 vs 模型 8–9/10"写成数字
 - [x] 页面只跑离线基线；模型成绩读 `eval/llm_result.json`，不在点击时调模型
-- [x] BIRD/Spider/DuSQL 方案评估（结论：现在不接，理由与工作量见上）
+- [x] BIRD Mini-Dev 公开集（SQLite，fresh holdout 50 题 24/50 官方 EX；独立 `benchmarks/`，不进 CI）；Spider/DuSQL 仍未接
 - [x] 放行只读 CTE / 窗口函数，支持"每个品类销售额前两名"这类分组 Top-N
 - [x] 复杂问法评测集（13 条，独立 `--complex`，规则 0/12 vs 模型最新 3 次 12/11/12（C9 偶发；不当硬门槛），不进 CI）
 - [x] 分析模式 MVP（显式 `mode=analysis`，默认关闭；Planner/Executor/Synthesizer；A/B 历史样本见上）
-- [x] 自动结论（Step 3，显式 `conclusion=true`，默认关闭；只描述结果、不解释原因；282 单测）
+- [x] 自动结论（Step 3，显式 `conclusion=true`，默认关闭；只描述结果、不解释原因；288 单测）
 - [ ] 分析模式调优：修 Planner 的 #13 聚合层级、#6/#12 全量列表；#5 已在代码层拦截；A/B 已有 raw artifact，需固定 rubric 多次采样
 - [ ] 接 Qdrant + ES，把内存索引换掉
 

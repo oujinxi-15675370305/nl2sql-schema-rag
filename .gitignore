@@ -14,6 +14,7 @@ venv/
 
 # 数据（演示库由脚本生成）
 data/*
+benchmarks/.data/
 !data/.gitkeep
 
 # 运行产物

@@ -26,7 +26,8 @@
 - 不做图表看板、不做完整账号体系（权限用"角色 → 可见列"配置演示）；
 - 不套 Agent 框架（LangGraph 之类），卖点是确定性校验；
 - 不做模型训练/微调；
-- 不在页面里跑模型评测（成本、延迟、非确定性），也不把公开 benchmark（BIRD/Spider）接进 CI；
+- 不在页面里跑模型评测（成本、延迟、非确定性）；公开集（BIRD）走独立 `benchmarks/`，手动跑，
+  不进 CI；Spider/DuSQL 未接。
   公开集要做就独立 `benchmarks/`、手动跑（见 README）。
 
 ## 3. 模块与验收标准
@@ -263,11 +264,12 @@ GET /api/health → { ok, tables, metrics, roles }
 | M5 评测与 CI | ✅ 已完成 | 57 条单轮（50 问数 + 7 意图/越权；6 指标 × 6 维度、31/36 组合、6 类时间）+ 7 会话 21 轮多轮评测；失败分类（routed/permission/validate/field/syntax/timeout/retrieval/result/intent）汇总；CI 三门槛 90% + artifact；扩容时修了退款率二次舍入；`--engine llm` 实测 deepseek-chat 单轮 50/50、多轮 21/21、回退 0（2026-11-20）；规则覆盖外 10 条（AC-5.6）规则 0/10、模型 8–9/10（多次采样，最近快照 8–9/10） |
 | M6 Docker + 截图/GIF | ✅ 已完成 | `docker compose up --build` 起 8000（容器内 seed、healthcheck、空 volume 补 seed）；`scripts/shots.py` 固定脚本产出 3 图 + 1 GIF；离线演示修复走 `/api/demo/repair`（脚本化生成器，不写会话、不参与评测）；180 个单测 |
 | LLM 主线化 / 规则 fallback（2026-11-20） | ✅ 已完成 | 规则 SQL 移到 `app/fallback.py`（`OfflineFallback`，离线降级 + CI 基线），`agent.py` 只留 LLM/校验/执行/重试；新增 `eval/hard_cases.json` 10 条与 `--hard` runner（单独统计、不进 CI）；README/SPEC/decisions 改成模型主线；166 测试全绿，CI 仍只跑 `--engine rule` |
-| 页面离线基线 / 模型快照（2026-11-21） | ✅ 已完成 | 按钮改「跑离线基线」；`scripts/record_llm_eval.py` 生成 `eval/llm_result.json`（只读快照），`GET /api/eval/llm/last` 有则显示「上次模型评测」、无/损坏则隐藏；接口与测试均不调模型；BIRD/Spider/DuSQL 仅方案评估、不接；180 单测 |
+| 页面离线基线 / 模型快照（2026-11-21） | ✅ 已完成 | 按钮改「跑离线基线」；`scripts/record_llm_eval.py` 生成 `eval/llm_result.json`（只读快照），`GET /api/eval/llm/last` 有则显示「上次模型评测」、无/损坏则隐藏；接口与测试均不调模型；当时 BIRD/Spider/DuSQL 仅方案评估；180 单测 |
 | 复杂问法评测（2026-11-22） | ✅ 已完成 | 13 条（12 可判定 + 1 归因未支持），`--complex` 单独统计、不进 CI；规则 0/12、`deepseek-chat` 曾 5 次 12/12，语义层后最新 3 次 12/11/12（C9 偶发；不当硬门槛）、回退 0；分组 GMV 口径见 README |
-| 分析模式 MVP（2026-11-23） | ✅ 已完成 | `mode=analysis` 默认关闭；Planner 2–4 步 → 每步复用 `ask` → Synthesizer 引用 `[sN]`、失败/口径警告补“局限”；282 单测；每步重试默认 1、总预算从 Planner 计时；复购错误 HAVING 判步骤不可用；prompt v3.1 复杂单 SQL 最新 3 次 12/11/12，holdout 3/3×3；A/B 旧 8/12、10/12 仅历史，复核重跑 raw：chat 26/26 步/5.98s/coverage 1.00，flash 25/26 步/19.2s/coverage 0.88（`eval/analysis_ab.json`），默认不换模型；#6/#12 整单 pay_amount 按明细拆分不可加总，已加确定性警告 |
-| 语义层清理（2026-11-24） | ✅ 已完成 | 删 Planner 契约死代码（`metric/dimensions/grain/output_columns`、输出列警告、第二条重规划触发）；执行约束改走 `ask(hint=...)` → `SchemaContext.instructions` 独立 prompt 段；复购表 prompt 只在表进上下文时拼；`app/semantics.py` 收口占比/复购判定；`id_map` 只映射保留步骤；删 `analysis_replanned`；282 单测；A/B 两轮 chat 26/26 & 25/26 步、flash 24/25 & 25/26 步，份额题 C4/C11 恒 2/2 + 1.00 |
-| 自动结论 Step 3（2026-11-23） | ✅ 已完成 | `conclusion=true` 显式开启、默认关闭；只对 LLM 成功单 SQL 多调一次模型；只描述结果、不解释原因；规则/空结果/失败不调；多轮用改写问句；非布尔 400；分析模式不叠加；页面开关默认关；实测 1.5–1.9s；282 单测 |
+| 公开集 Step 4（2026-11-25） | ✅ 已完成 | 独立 `benchmarks/bird_sqlite.py`；BIRD Mini-Dev SQLite **fresh holdout 50 题**（seed 20261127，排除已跑 75 题）、`deepseek-chat`，**官方 EX 24/50**（strict 23/50）、1 题 SQL 执行失败、gold 失败 0；数据库描述/值样例与执行重试在 dev 上无净收益；非官方 leaderboard，Spider/DuSQL 未接 |
+| 分析模式 MVP（2026-11-23） | ✅ 已完成 | `mode=analysis` 默认关闭；Planner 2–4 步 → 每步复用 `ask` → Synthesizer 引用 `[sN]`、失败/口径警告补“局限”；288 单测；每步重试默认 1、总预算从 Planner 计时；复购错误 HAVING 判步骤不可用；prompt v3.1 复杂单 SQL 最新 3 次 12/11/12，holdout 3/3×3；A/B 旧 8/12、10/12 仅历史，复核重跑 raw：chat 26/26 步/5.98s/coverage 1.00，flash 25/26 步/19.2s/coverage 0.88（`eval/analysis_ab.json`），默认不换模型；#6/#12 整单 pay_amount 按明细拆分不可加总，已加确定性警告 |
+| 语义层清理（2026-11-24） | ✅ 已完成 | 删 Planner 契约死代码（`metric/dimensions/grain/output_columns`、输出列警告、第二条重规划触发）；执行约束改走 `ask(hint=...)` → `SchemaContext.instructions` 独立 prompt 段；复购表 prompt 只在表进上下文时拼；`app/semantics.py` 收口占比/复购判定；`id_map` 只映射保留步骤；删 `analysis_replanned`；288 单测；A/B 两轮 chat 26/26 & 25/26 步、flash 24/25 & 25/26 步，份额题 C4/C11 恒 2/2 + 1.00 |
+| 自动结论 Step 3（2026-11-23） | ✅ 已完成 | `conclusion=true` 显式开启、默认关闭；只对 LLM 成功单 SQL 多调一次模型；只描述结果、不解释原因；规则/空结果/失败不调；多轮用改写问句；非布尔 400；分析模式不叠加；页面开关默认关；实测 1.5–1.9s；288 单测 |
 
 ## 8. 开发约定
 

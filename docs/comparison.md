@@ -32,14 +32,15 @@
 | 回答形态 | SQL + 结果 + 中文结论 + trace | SQL + 结果表；可选分析模式（`mode=analysis`）给步骤 + 引用 `[sN]` 的结论；可选自动结论（`conclusion=true`，1–3 句、只描述结果） |
 | 记忆 | 会话 4 轮 + 长期偏好（文件/Redis） | 会话 5 轮、槽位继承（进程内存） |
 | 接口 | FastAPI + CLI + Streamlit + MCP | HTTP + 原生 JS 页面 |
-| 测试 | 141 个（不碰模型） | 282 个（不碰模型，含 HTTP 契约、分析/holdout/自动结论/A-B 覆盖率） |
+| 测试 | 141 个（不碰模型） | 288 个（不碰模型，含 HTTP 契约、分析/holdout/自动结论/A-B 覆盖率） |
 | 运行时依赖 | LangGraph、sqlglot、FastAPI、Streamlit 等 | **零运行时依赖（标准库）** |
-| 评测 | 自建 60 + DuSQL 100 + BIRD mini 30/55 | 自建 57+21 + hard 10 + complex 13；无公开集分数 |
-| 作者自报准确率 | qwen-plus：自建 79.6/98.0、DuSQL 48.0/68.0；qwen2.5:7b：自建 63.3/93.9、BIRD mini 40.0/76.7（严格/宽松） | deepseek-chat：自建 50/50、多轮 21/21、hard 8–9/10、complex 最新 3 次 12/11/12（C9 偶发；不当硬门槛）；无公开集分数 |
+| 评测 | 自建 60 + DuSQL 100 + BIRD mini 30/55 | 自建 57+21 + hard 10 + complex 13 + **BIRD Mini-Dev fresh holdout 50 题** |
+| 作者自报准确率 | qwen-plus：自建 79.6/98.0、DuSQL 48.0/68.0；qwen2.5:7b：自建 63.3/93.9、BIRD mini 40.0/76.7（严格/宽松） | deepseek-chat：自建 50/50、多轮 21/21、hard 8–9/10、complex 最新 3 次 12/11/12（C9 偶发；不当硬门槛）；**BIRD Mini-Dev fresh holdout 50 题官方 EX 24/50（48%）** |
 
 两个项目不能直接比分数：本项目的 50 条是围绕 6 个指标 × 6 个维度手写的，难度明显低于 DuSQL/BIRD；
 `nl2sql-agent` 的 60 条也自建，但它另外接了公开集，且公开集分数明显低于自建集（自建 79.6 → DuSQL 48.0）。
-**没有公开集分数时，50/50 只能说明"这套题会做"，不能说明"NL2SQL 会做"。**
+本项目现在也有了 BIRD Mini-Dev fresh holdout 50 题：官方 EX 24/50（48%），换 schema 后明显低于自建 complex 的 12/12，这是正常的。
+但两边样本量、prompt、strict/loose 定义不同，**不能把 24/50 和 30/55 当同一张榜**。
 
 ## 3. 用真实问题探测本项目的边界
 
@@ -78,8 +79,8 @@
 3. **分析模式（1–2 天，可选）**：显式 `mode=analysis`；LLM 先拆成 2–4 个子问题，
    每个复用现有 `ask()` 的检索/校验/执行/权限链路，最后用一次 LLM 综合结论；
    UI 展示步骤和每步 SQL。仍守只读、权限、超时；不做无限自治 agent。
-4. **公开集（1–2 天，可选）**：按 README 里的 BIRD/Spider 方案，独立 `benchmarks/`、抽样、
-   关自动 LIMIT、严格/宽松 EX、打乱题目；不进 CI。没有真跑过就不写分数。
+4. **公开集（BIRD 已做，Spider/DuSQL 未接）**：独立 `benchmarks/`、fresh holdout 50 题、关自动 LIMIT、
+   官方 EX；不进 CI。已跑 BIRD Mini-Dev SQLite fresh holdout 50 题官方 EX 24/50；没有真跑过就不写分数。
 
 不建议：为了"像 DB-GPT"而接一堆 Agent/RAG/沙箱依赖；也不建议在页面点击里跑模型评测。
 这个项目的优势是"小、透明、可复现"，不是"功能多"。
@@ -95,4 +96,5 @@
   [Vanna](https://github.com/vanna-ai/vanna)、
   [Dataherald](https://github.com/Dataherald/dataherald)、
   [nl2sql-agent](https://github.com/Howard-Qin-art/nl2sql-agent)。
-- 本项目数字：`eval/` 与 `eval/llm_result.json`，均为本机真实运行；公开集分数：无。
+- 本项目数字：`eval/` 与 `eval/llm_result.json`，均为本机真实运行；公开集：BIRD Mini-Dev SQLite
+  fresh holdout 50 题官方 EX 24/50（`benchmarks/results/bird_holdout.json`），非官方 leaderboard。

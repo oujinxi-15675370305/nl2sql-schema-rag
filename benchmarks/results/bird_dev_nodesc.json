@@ -1,0 +1,602 @@
+{
+  "summary": {
+    "dataset": "BIRD Mini-Dev SQLite",
+    "questions_file": "C:\\Users\\DELL\\PycharmProjects\\nl2sql-schema-rag\\benchmarks\\.data\\minidev\\minidev\\MINIDEV\\mini_dev_sqlite.json",
+    "db_root": "C:\\Users\\DELL\\PycharmProjects\\nl2sql-schema-rag\\benchmarks\\.data\\minidev\\minidev\\MINIDEV\\dev_databases",
+    "model": "deepseek-chat",
+    "limit": 25,
+    "seed": 20261126,
+    "excluded": 50,
+    "total": 25,
+    "official": 14,
+    "official_rate": 0.56,
+    "strict": 14,
+    "loose": 14,
+    "strict_rate": 0.56,
+    "loose_rate": 0.56,
+    "errors": 0,
+    "gold_errors": 0,
+    "retried": 0,
+    "descriptions": false,
+    "retry_errors": 1,
+    "avg_latency_ms": 955.1,
+    "generated_at": "2026-11-25T01:41:45+0800"
+  },
+  "cases": [
+    {
+      "id": 1,
+      "source_index": 264,
+      "db_id": "superhero",
+      "question": "List down at least five superpowers of male superheroes.",
+      "predicted_sql": "SELECT sp.power_name\nFROM superhero s\nJOIN gender g ON s.gender_id = g.id\nJOIN hero_power hp ON s.id = hp.hero_id\nJOIN superpower sp ON hp.power_id = sp.id\nWHERE g.gender = 'Male'\nLIMIT 5;",
+      "gold_sql": "SELECT T3.power_name FROM superhero AS T1 INNER JOIN hero_power AS T2 ON T1.id = T2.hero_id INNER JOIN superpower AS T3 ON T3.id = T2.power_id INNER JOIN gender AS T4 ON T4.id = T1.gender_id WHERE T4.gender = 'Male' LIMIT 5",
+      "strict": true,
+      "loose": true,
+      "official": true,
+      "error": "",
+      "gold_error": "",
+      "retried": false,
+      "attempts": [
+        {
+          "n": 1,
+          "sql": "SELECT sp.power_name\nFROM superhero s\nJOIN gender g ON s.gender_id = g.id\nJOIN hero_power hp ON s.id = hp.hero_id\nJOIN superpower sp ON hp.power_id = sp.id\nWHERE g.gender = 'Male'\nLIMIT 5;",
+          "error": "",
+          "stage": "ok"
+        }
+      ],
+      "latency_ms": 1046
+    },
+    {
+      "id": 2,
+      "source_index": 248,
+      "db_id": "superhero",
+      "question": "Please list the superhero names of all the superheroes that have blue eyes and blond hair.",
+      "predicted_sql": "SELECT s.superhero_name\nFROM superhero s\nJOIN colour e ON s.eye_colour_id = e.id\nJOIN colour h ON s.hair_colour_id = h.id\nWHERE e.colour = 'Blue' AND h.colour = 'Blond';",
+      "gold_sql": "SELECT T1.superhero_name FROM superhero AS T1 INNER JOIN colour AS T2 ON T1.eye_colour_id = T2.id INNER JOIN colour AS T3 ON T1.hair_colour_id = T3.id WHERE T2.colour = 'Blue' AND T3.colour = 'Blond'",
+      "strict": true,
+      "loose": true,
+      "official": true,
+      "error": "",
+      "gold_error": "",
+      "retried": false,
+      "attempts": [
+        {
+          "n": 1,
+          "sql": "SELECT s.superhero_name\nFROM superhero s\nJOIN colour e ON s.eye_colour_id = e.id\nJOIN colour h ON s.hair_colour_id = h.id\nWHERE e.colour = 'Blue' AND h.colour = 'Blond';",
+          "error": "",
+          "stage": "ok"
+        }
+      ],
+      "latency_ms": 969
+    },
+    {
+      "id": 3,
+      "source_index": 19,
+      "db_id": "debit_card_specializing",
+      "question": "Among the transactions made in the gas stations in the Czech Republic, how many of them are taken place after 2012/1/1?",
+      "predicted_sql": "SELECT COUNT(*) FROM transactions_1k t JOIN gasstations g ON t.GasStationID = g.GasStationID WHERE g.Country = 'CZE' AND t.Date > '2012-01-01';",
+      "gold_sql": "SELECT COUNT(T1.TransactionID) FROM transactions_1k AS T1 INNER JOIN gasstations AS T2 ON T1.GasStationID = T2.GasStationID WHERE T2.Country = 'CZE' AND STRFTIME('%Y', T1.Date) >= '2012'",
+      "strict": true,
+      "loose": true,
+      "official": true,
+      "error": "",
+      "gold_error": "",
+      "retried": false,
+      "attempts": [
+        {
+          "n": 1,
+          "sql": "SELECT COUNT(*) FROM transactions_1k t JOIN gasstations g ON t.GasStationID = g.GasStationID WHERE g.Country = 'CZE' AND t.Date > '2012-01-01';",
+          "error": "",
+          "stage": "ok"
+        }
+      ],
+      "latency_ms": 577
+    },
+    {
+      "id": 4,
+      "source_index": 352,
+      "db_id": "card_games",
+      "question": "Name the card and artist with the most ruling information. Also state if the card is a promotional printing.",
+      "predicted_sql": "SELECT c.name, c.artist, c.isPromo\nFROM cards c\nJOIN rulings r ON c.uuid = r.uuid\nGROUP BY c.uuid\nORDER BY COUNT(r.uuid) DESC\nLIMIT 1;",
+      "gold_sql": "SELECT T1.name, T1.artist, T1.isPromo FROM cards AS T1 INNER JOIN rulings AS T2 ON T1.uuid = T2.uuid WHERE T1.isPromo = 1 AND T1.artist = (SELECT artist FROM cards WHERE isPromo = 1 GROUP BY artist HAVING COUNT(DISTINCT uuid) = (SELECT MAX(count_uuid) FROM ( SELECT COUNT(DISTINCT uuid) AS count_uuid FROM cards WHERE isPromo = 1 GROUP BY artist ))) LIMIT 1",
+      "strict": false,
+      "loose": false,
+      "official": false,
+      "error": "",
+      "gold_error": "",
+      "retried": false,
+      "attempts": [
+        {
+          "n": 1,
+          "sql": "SELECT c.name, c.artist, c.isPromo\nFROM cards c\nJOIN rulings r ON c.uuid = r.uuid\nGROUP BY c.uuid\nORDER BY COUNT(r.uuid) DESC\nLIMIT 1;",
+          "error": "",
+          "stage": "ok"
+        }
+      ],
+      "latency_ms": 1312
+    },
+    {
+      "id": 5,
+      "source_index": 377,
+      "db_id": "card_games",
+      "question": "Which card costs more converted mana, \"Serra Angel\" or \"Shrine Keeper\"?",
+      "predicted_sql": "SELECT name, convertedManaCost FROM cards WHERE name IN ('Serra Angel', 'Shrine Keeper') ORDER BY convertedManaCost DESC LIMIT 1;",
+      "gold_sql": "SELECT name FROM cards WHERE name IN ('Serra Angel', 'Shrine Keeper') ORDER BY convertedManaCost DESC LIMIT 1",
+      "strict": false,
+      "loose": false,
+      "official": false,
+      "error": "",
+      "gold_error": "",
+      "retried": false,
+      "attempts": [
+        {
+          "n": 1,
+          "sql": "SELECT name, convertedManaCost FROM cards WHERE name IN ('Serra Angel', 'Shrine Keeper') ORDER BY convertedManaCost DESC LIMIT 1;",
+          "error": "",
+          "stage": "ok"
+        }
+      ],
+      "latency_ms": 1171
+    },
+    {
+      "id": 6,
+      "source_index": 47,
+      "db_id": "student_club",
+      "question": "What is the total cost of the pizzas for all the events?",
+      "predicted_sql": "SELECT SUM(cost) FROM expense WHERE expense_description = 'Pizza';",
+      "gold_sql": "SELECT SUM(cost) FROM expense WHERE expense_description = 'Pizza'",
+      "strict": true,
+      "loose": true,
+      "official": true,
+      "error": "",
+      "gold_error": "",
+      "retried": false,
+      "attempts": [
+        {
+          "n": 1,
+          "sql": "SELECT SUM(cost) FROM expense WHERE expense_description = 'Pizza';",
+          "error": "",
+          "stage": "ok"
+        }
+      ],
+      "latency_ms": 1156
+    },
+    {
+      "id": 7,
+      "source_index": 487,
+      "db_id": "financial",
+      "question": "How many accounts have running contracts in Branch location 1?",
+      "predicted_sql": "SELECT COUNT(DISTINCT l.account_id) FROM loan l JOIN account a ON l.account_id = a.account_id WHERE l.status = 'C' AND a.district_id = 1;",
+      "gold_sql": "SELECT COUNT(T1.account_id) FROM account AS T1 INNER JOIN district AS T2 ON T1.district_id = T2.district_id INNER JOIN loan AS T3 ON T1.account_id = T3.account_id WHERE T1.district_id = 1 AND (T3.status = 'C' OR T3.status = 'D')",
+      "strict": false,
+      "loose": false,
+      "official": false,
+      "error": "",
+      "gold_error": "",
+      "retried": false,
+      "attempts": [
+        {
+          "n": 1,
+          "sql": "SELECT COUNT(DISTINCT l.account_id) FROM loan l JOIN account a ON l.account_id = a.account_id WHERE l.status = 'C' AND a.district_id = 1;",
+          "error": "",
+          "stage": "ok"
+        }
+      ],
+      "latency_ms": 561
+    },
+    {
+      "id": 8,
+      "source_index": 165,
+      "db_id": "european_football_2",
+      "question": "State the name of the most strongest player.",
+      "predicted_sql": "SELECT p.player_name FROM Player p JOIN Player_Attributes pa ON p.player_api_id = pa.player_api_id ORDER BY pa.overall_rating DESC LIMIT 1;",
+      "gold_sql": "SELECT DISTINCT t1.player_name FROM Player AS t1 INNER JOIN Player_Attributes AS t2 ON t1.player_api_id = t2.player_api_id WHERE t2.overall_rating = (SELECT MAX(overall_rating) FROM Player_Attributes)",
+      "strict": true,
+      "loose": true,
+      "official": true,
+      "error": "",
+      "gold_error": "",
+      "retried": false,
+      "attempts": [
+        {
+          "n": 1,
+          "sql": "SELECT p.player_name FROM Player p JOIN Player_Attributes pa ON p.player_api_id = pa.player_api_id ORDER BY pa.overall_rating DESC LIMIT 1;",
+          "error": "",
+          "stage": "ok"
+        }
+      ],
+      "latency_ms": 969
+    },
+    {
+      "id": 9,
+      "source_index": 183,
+      "db_id": "formula_1",
+      "question": "Give the coordinate position for Abu Dhabi Grand Prix.",
+      "predicted_sql": "SELECT lat, lng FROM circuits WHERE circuitId IN (SELECT circuitId FROM races WHERE name = 'Abu Dhabi Grand Prix');",
+      "gold_sql": "SELECT DISTINCT T1.lat, T1.lng FROM circuits AS T1 INNER JOIN races AS T2 ON T2.circuitID = T1.circuitId WHERE T2.name = 'Abu Dhabi Grand Prix'",
+      "strict": true,
+      "loose": true,
+      "official": true,
+      "error": "",
+      "gold_error": "",
+      "retried": false,
+      "attempts": [
+        {
+          "n": 1,
+          "sql": "SELECT lat, lng FROM circuits WHERE circuitId IN (SELECT circuitId FROM races WHERE name = 'Abu Dhabi Grand Prix');",
+          "error": "",
+          "stage": "ok"
+        }
+      ],
+      "latency_ms": 1000
+    },
+    {
+      "id": 10,
+      "source_index": 360,
+      "db_id": "card_games",
+      "question": "What are the cards belong to duel deck a? List the ID.",
+      "predicted_sql": "SELECT id FROM cards WHERE duelDeck = 'a';",
+      "gold_sql": "SELECT id FROM cards WHERE duelDeck = 'a'",
+      "strict": true,
+      "loose": true,
+      "official": true,
+      "error": "",
+      "gold_error": "",
+      "retried": false,
+      "attempts": [
+        {
+          "n": 1,
+          "sql": "SELECT id FROM cards WHERE duelDeck = 'a';",
+          "error": "",
+          "stage": "ok"
+        }
+      ],
+      "latency_ms": 639
+    },
+    {
+      "id": 11,
+      "source_index": 126,
+      "db_id": "thrombosis_prediction",
+      "question": "Among the patients who have an abnormal level of glutamic oxaloacetic transaminase, when was the youngest of them born?",
+      "predicted_sql": "SELECT Birthday FROM Patient WHERE ID IN (SELECT ID FROM Laboratory WHERE GOT >= 60) ORDER BY Birthday DESC LIMIT 1;",
+      "gold_sql": "SELECT T1.Birthday FROM Patient AS T1 INNER JOIN Laboratory AS T2 ON T1.ID = T2.ID WHERE T2.GOT >= 60 ORDER BY T1.Birthday DESC LIMIT 1",
+      "strict": true,
+      "loose": true,
+      "official": true,
+      "error": "",
+      "gold_error": "",
+      "retried": false,
+      "attempts": [
+        {
+          "n": 1,
+          "sql": "SELECT Birthday FROM Patient WHERE ID IN (SELECT ID FROM Laboratory WHERE GOT >= 60) ORDER BY Birthday DESC LIMIT 1;",
+          "error": "",
+          "stage": "ok"
+        }
+      ],
+      "latency_ms": 703
+    },
+    {
+      "id": 12,
+      "source_index": 356,
+      "db_id": "card_games",
+      "question": "What is the rule of playing card \"Benalish Knight\"?",
+      "predicted_sql": "SELECT l.format, l.status FROM cards c JOIN legalities l ON c.uuid = l.uuid WHERE c.name = 'Benalish Knight' ORDER BY l.format;",
+      "gold_sql": "SELECT T2.format FROM cards AS T1 INNER JOIN legalities AS T2 ON T1.uuid = T2.uuid WHERE T1.name = 'Benalish Knight'",
+      "strict": false,
+      "loose": false,
+      "official": false,
+      "error": "",
+      "gold_error": "",
+      "retried": false,
+      "attempts": [
+        {
+          "n": 1,
+          "sql": "SELECT l.format, l.status FROM cards c JOIN legalities l ON c.uuid = l.uuid WHERE c.name = 'Benalish Knight' ORDER BY l.format;",
+          "error": "",
+          "stage": "ok"
+        }
+      ],
+      "latency_ms": 1561
+    },
+    {
+      "id": 13,
+      "source_index": 353,
+      "db_id": "card_games",
+      "question": "Calculate the percentage of the cards availabe in Chinese Simplified.",
+      "predicted_sql": "SELECT (SUM(CASE WHEN language = 'Chinese Simplified' THEN 1 ELSE 0 END) * 100.0) / COUNT(*) AS percentage FROM foreign_data;",
+      "gold_sql": "SELECT CAST(SUM(CASE WHEN T2.language = 'Chinese Simplified' THEN 1 ELSE 0 END) AS REAL) * 100 / COUNT(T1.id) FROM cards AS T1 INNER JOIN foreign_data AS T2 ON T1.uuid = T2.uuid",
+      "strict": false,
+      "loose": false,
+      "official": false,
+      "error": "",
+      "gold_error": "",
+      "retried": false,
+      "attempts": [
+        {
+          "n": 1,
+          "sql": "SELECT (SUM(CASE WHEN language = 'Chinese Simplified' THEN 1 ELSE 0 END) * 100.0) / COUNT(*) AS percentage FROM foreign_data;",
+          "error": "",
+          "stage": "ok"
+        }
+      ],
+      "latency_ms": 1375
+    },
+    {
+      "id": 14,
+      "source_index": 166,
+      "db_id": "european_football_2",
+      "question": "Who are the players that tend to be attacking when their mates were doing attack moves? List down their name.",
+      "predicted_sql": "SELECT DISTINCT p.player_name\nFROM Player p\nJOIN Player_Attributes pa ON pa.player_api_id = p.player_api_id\nWHERE pa.attacking_work_rate = 'high'\nORDER BY p.player_name;",
+      "gold_sql": "SELECT DISTINCT t1.player_name FROM Player AS t1 INNER JOIN Player_Attributes AS t2 ON t1.player_api_id = t2.player_api_id WHERE t2.attacking_work_rate = 'high'",
+      "strict": true,
+      "loose": true,
+      "official": true,
+      "error": "",
+      "gold_error": "",
+      "retried": false,
+      "attempts": [
+        {
+          "n": 1,
+          "sql": "SELECT DISTINCT p.player_name\nFROM Player p\nJOIN Player_Attributes pa ON pa.player_api_id = p.player_api_id\nWHERE pa.attacking_work_rate = 'high'\nORDER BY p.player_name;",
+          "error": "",
+          "stage": "ok"
+        }
+      ],
+      "latency_ms": 844
+    },
+    {
+      "id": 15,
+      "source_index": 59,
+      "db_id": "student_club",
+      "question": "Indicate the top source of funds received in September 2019 based on their amount.",
+      "predicted_sql": "SELECT source FROM income WHERE date_received BETWEEN '2019-09-01' AND '2019-09-30' ORDER BY amount DESC LIMIT 1;",
+      "gold_sql": "SELECT source FROM income WHERE date_received BETWEEN '2019-09-01' and '2019-09-30' ORDER BY source DESC LIMIT 1",
+      "strict": true,
+      "loose": true,
+      "official": true,
+      "error": "",
+      "gold_error": "",
+      "retried": false,
+      "attempts": [
+        {
+          "n": 1,
+          "sql": "SELECT source FROM income WHERE date_received BETWEEN '2019-09-01' AND '2019-09-30' ORDER BY amount DESC LIMIT 1;",
+          "error": "",
+          "stage": "ok"
+        }
+      ],
+      "latency_ms": 639
+    },
+    {
+      "id": 16,
+      "source_index": 227,
+      "db_id": "formula_1",
+      "question": "From 2000 to 2005, what percentage of drivers who were born before 1985 and the lap numbers were over 50?",
+      "predicted_sql": "SELECT CAST(COUNT(DISTINCT CASE WHEN CAST(strftime('%Y', d.dob) AS INTEGER) < 1985 AND lt.lap > 50 THEN d.driverId END) AS REAL) * 100 / COUNT(DISTINCT d.driverId) FROM drivers d JOIN lapTimes lt ON lt.driverId = d.driverId JOIN races r ON r.raceId = lt.raceId WHERE r.year BETWEEN 2000 AND 2005;",
+      "gold_sql": "SELECT CAST(SUM(IIF(STRFTIME('%Y', T3.dob) < '1985' AND T1.laps > 50, 1, 0)) AS REAL) * 100 / COUNT(*) FROM results AS T1 INNER JOIN races AS T2 on T1.raceId = T2.raceId INNER JOIN drivers AS T3 on T1.driverId = T3.driverId WHERE T2.year BETWEEN 2000 AND 2005",
+      "strict": false,
+      "loose": false,
+      "official": false,
+      "error": "",
+      "gold_error": "",
+      "retried": false,
+      "attempts": [
+        {
+          "n": 1,
+          "sql": "SELECT CAST(COUNT(DISTINCT CASE WHEN CAST(strftime('%Y', d.dob) AS INTEGER) < 1985 AND lt.lap > 50 THEN d.driverId END) AS REAL) * 100 / COUNT(DISTINCT d.driverId) FROM drivers d JOIN lapTimes lt ON lt.driverId = d.driverId JOIN races r ON r.raceId = lt.raceId WHERE r.year BETWEEN 2000 AND 2005;",
+          "error": "",
+          "stage": "ok"
+        }
+      ],
+      "latency_ms": 1110
+    },
+    {
+      "id": 17,
+      "source_index": 193,
+      "db_id": "formula_1",
+      "question": "For all the drivers who finished the game in race No. 872, who is the youngest?",
+      "predicted_sql": "SELECT d.forename, d.surname, d.dob\nFROM results r\nJOIN drivers d ON d.driverId = r.driverId\nWHERE r.raceId = 872\n  AND r.time IS NOT NULL\nORDER BY d.dob DESC\nLIMIT 1;",
+      "gold_sql": "SELECT T1.forename, T1.surname FROM drivers AS T1 INNER JOIN results AS T2 ON T2.driverId = T1.driverId WHERE T2.raceId = 872 AND T2.time IS NOT NULL ORDER BY T1.dob DESC LIMIT 1",
+      "strict": false,
+      "loose": false,
+      "official": false,
+      "error": "",
+      "gold_error": "",
+      "retried": false,
+      "attempts": [
+        {
+          "n": 1,
+          "sql": "SELECT d.forename, d.surname, d.dob\nFROM results r\nJOIN drivers d ON d.driverId = r.driverId\nWHERE r.raceId = 872\n  AND r.time IS NOT NULL\nORDER BY d.dob DESC\nLIMIT 1;",
+          "error": "",
+          "stage": "ok"
+        }
+      ],
+      "latency_ms": 843
+    },
+    {
+      "id": 18,
+      "source_index": 137,
+      "db_id": "european_football_2",
+      "question": "Find the average number of long-shot done by Ahmed Samir Farag.",
+      "predicted_sql": "SELECT AVG(pa.long_shots) FROM Player_Attributes pa JOIN Player p ON pa.player_api_id = p.player_api_id WHERE p.player_name = 'Ahmed Samir Farag';",
+      "gold_sql": "SELECT CAST(SUM(t2.long_shots) AS REAL) / COUNT(t2.`date`) FROM Player AS t1 INNER JOIN Player_Attributes AS t2 ON t1.player_api_id = t2.player_api_id WHERE t1.player_name = 'Ahmed Samir Farag'",
+      "strict": true,
+      "loose": true,
+      "official": true,
+      "error": "",
+      "gold_error": "",
+      "retried": false,
+      "attempts": [
+        {
+          "n": 1,
+          "sql": "SELECT AVG(pa.long_shots) FROM Player_Attributes pa JOIN Player p ON pa.player_api_id = p.player_api_id WHERE p.player_name = 'Ahmed Samir Farag';",
+          "error": "",
+          "stage": "ok"
+        }
+      ],
+      "latency_ms": 1311
+    },
+    {
+      "id": 19,
+      "source_index": 302,
+      "db_id": "codebase_community",
+      "question": "What is the display name of the user who last edited the post \"Examples for teaching: Correlation does not mean causation\"?",
+      "predicted_sql": "SELECT u.DisplayName FROM posts p JOIN users u ON p.LastEditorUserId = u.Id WHERE p.Title = 'Examples for teaching: Correlation does not mean causation';",
+      "gold_sql": "SELECT T2.DisplayName FROM posts AS T1 INNER JOIN users AS T2 ON T1.LastEditorUserId = T2.Id WHERE T1.Title = 'Examples for teaching: Correlation does not mean causation'",
+      "strict": true,
+      "loose": true,
+      "official": true,
+      "error": "",
+      "gold_error": "",
+      "retried": false,
+      "attempts": [
+        {
+          "n": 1,
+          "sql": "SELECT u.DisplayName FROM posts p JOIN users u ON p.LastEditorUserId = u.Id WHERE p.Title = 'Examples for teaching: Correlation does not mean causation';",
+          "error": "",
+          "stage": "ok"
+        }
+      ],
+      "latency_ms": 844
+    },
+    {
+      "id": 20,
+      "source_index": 448,
+      "db_id": "california_schools",
+      "question": "What is the eligible free rate of the 10th and 11th schools with the highest enrolment for students in grades 1 through 12?",
+      "predicted_sql": "SELECT (frpm.\"Free Meal Count (K-12)\" * 1.0 / frpm.\"Enrollment (K-12)\") AS eligible_free_rate\nFROM frpm\nJOIN schools ON frpm.CDSCode = schools.CDSCode\nWHERE frpm.\"Enrollment (K-12)\" IS NOT NULL\nORDER BY frpm.\"Enrollment (K-12)\" DESC\nLIMIT 2 OFFSET 9;",
+      "gold_sql": "SELECT CAST(`Free Meal Count (K-12)` AS REAL) / `Enrollment (K-12)` FROM frpm ORDER BY `Enrollment (K-12)` DESC LIMIT 9, 2",
+      "strict": true,
+      "loose": true,
+      "official": true,
+      "error": "",
+      "gold_error": "",
+      "retried": false,
+      "attempts": [
+        {
+          "n": 1,
+          "sql": "SELECT (frpm.\"Free Meal Count (K-12)\" * 1.0 / frpm.\"Enrollment (K-12)\") AS eligible_free_rate\nFROM frpm\nJOIN schools ON frpm.CDSCode = schools.CDSCode\nWHERE frpm.\"Enrollment (K-12)\" IS NOT NULL\nORDER BY frpm.\"Enrollment (K-12)\" DESC\nLIMIT 2 OFFSET 9;",
+          "error": "",
+          "stage": "ok"
+        }
+      ],
+      "latency_ms": 1202
+    },
+    {
+      "id": 21,
+      "source_index": 72,
+      "db_id": "student_club",
+      "question": "What are the budget category of the events located at MU 215 and a guest speaker type with a 0 budget spent?",
+      "predicted_sql": "SELECT b.category FROM budget b JOIN event e ON b.link_to_event = e.event_id WHERE e.location = 'MU 215' AND e.type = 'Guest Speaker' AND b.spent = 0;",
+      "gold_sql": "SELECT DISTINCT T2.category, T1.type FROM event AS T1 INNER JOIN budget AS T2 ON T1.event_id = T2.link_to_event WHERE T1.location = 'MU 215' AND T2.spent = 0 AND T1.type = 'Guest Speaker'",
+      "strict": false,
+      "loose": false,
+      "official": false,
+      "error": "",
+      "gold_error": "",
+      "retried": false,
+      "attempts": [
+        {
+          "n": 1,
+          "sql": "SELECT b.category FROM budget b JOIN event e ON b.link_to_event = e.event_id WHERE e.location = 'MU 215' AND e.type = 'Guest Speaker' AND b.spent = 0;",
+          "error": "",
+          "stage": "ok"
+        }
+      ],
+      "latency_ms": 547
+    },
+    {
+      "id": 22,
+      "source_index": 298,
+      "db_id": "codebase_community",
+      "question": "Please list the display names of all the users whose accounts were created in the year 2011.",
+      "predicted_sql": "SELECT DisplayName FROM users WHERE strftime('%Y', CreationDate) = '2011';",
+      "gold_sql": "SELECT DisplayName FROM users WHERE STRFTIME('%Y', CreationDate) = '2011'",
+      "strict": true,
+      "loose": true,
+      "official": true,
+      "error": "",
+      "gold_error": "",
+      "retried": false,
+      "attempts": [
+        {
+          "n": 1,
+          "sql": "SELECT DisplayName FROM users WHERE strftime('%Y', CreationDate) = '2011';",
+          "error": "",
+          "stage": "ok"
+        }
+      ],
+      "latency_ms": 889
+    },
+    {
+      "id": 23,
+      "source_index": 367,
+      "db_id": "card_games",
+      "question": "How many unknown power cards contain info about the triggered ability",
+      "predicted_sql": "SELECT COUNT(*) FROM cards WHERE (power IS NULL OR power = '*') AND text LIKE '%triggered ability%';",
+      "gold_sql": "SELECT Count(DISTINCT T1.id) FROM cards AS T1 INNER JOIN rulings AS T2 ON T1.uuid = T2.uuid WHERE (T1.power IS NULL OR T1.power = '*') AND T2.text LIKE '%triggered ability%'",
+      "strict": false,
+      "loose": false,
+      "official": false,
+      "error": "",
+      "gold_error": "",
+      "retried": false,
+      "attempts": [
+        {
+          "n": 1,
+          "sql": "SELECT COUNT(*) FROM cards WHERE (power IS NULL OR power = '*') AND text LIKE '%triggered ability%';",
+          "error": "",
+          "stage": "ok"
+        }
+      ],
+      "latency_ms": 860
+    },
+    {
+      "id": 24,
+      "source_index": 318,
+      "db_id": "codebase_community",
+      "question": "Which user added a bounty amount of 50 to the post title mentioning variance?",
+      "predicted_sql": "SELECT u.DisplayName FROM votes v JOIN posts p ON v.PostId = p.Id JOIN users u ON v.UserId = u.Id WHERE v.BountyAmount = 50 AND p.Title LIKE '%variance%'",
+      "gold_sql": "SELECT T3.DisplayName, T1.Title FROM posts AS T1 INNER JOIN votes AS T2 ON T1.Id = T2.PostId INNER JOIN users AS T3 ON T3.Id = T2.UserId WHERE T2.BountyAmount = 50 AND T1.Title LIKE '%variance%'",
+      "strict": false,
+      "loose": false,
+      "official": false,
+      "error": "",
+      "gold_error": "",
+      "retried": false,
+      "attempts": [
+        {
+          "n": 1,
+          "sql": "SELECT u.DisplayName FROM votes v JOIN posts p ON v.PostId = p.Id JOIN users u ON v.UserId = u.Id WHERE v.BountyAmount = 50 AND p.Title LIKE '%variance%'",
+          "error": "",
+          "stage": "ok"
+        }
+      ],
+      "latency_ms": 796
+    },
+    {
+      "id": 25,
+      "source_index": 486,
+      "db_id": "financial",
+      "question": "Which are the top ten withdrawals (non-credit card) by district names for the month of January 1996?",
+      "predicted_sql": "SELECT d.A2, SUM(t.amount) AS total_withdrawal\nFROM trans t\nJOIN account a ON t.account_id = a.account_id\nJOIN district d ON a.district_id = d.district_id\nWHERE t.type = 'VYDAJ'\n  AND t.date LIKE '1996-01%'\nGROUP BY d.A2\nORDER BY total_withdrawal DESC\nLIMIT 10;",
+      "gold_sql": "SELECT DISTINCT T1.A2 FROM district AS T1 INNER JOIN account AS T2 ON T1.district_id = T2.district_id INNER JOIN trans AS T3 ON T2.account_id = T3.account_id WHERE T3.type = 'VYDAJ' AND T3.date LIKE '1996-01%' ORDER BY A2 ASC LIMIT 10",
+      "strict": false,
+      "loose": false,
+      "official": false,
+      "error": "",
+      "gold_error": "",
+      "retried": false,
+      "attempts": [
+        {
+          "n": 1,
+          "sql": "SELECT d.A2, SUM(t.amount) AS total_withdrawal\nFROM trans t\nJOIN account a ON t.account_id = a.account_id\nJOIN district d ON a.district_id = d.district_id\nWHERE t.type = 'VYDAJ'\n  AND t.date LIKE '1996-01%'\nGROUP BY d.A2\nORDER BY total_withdrawal DESC\nLIMIT 10;",
+          "error": "",
+          "stage": "ok"
+        }
+      ],
+      "latency_ms": 953
+    }
+  ]
+}
