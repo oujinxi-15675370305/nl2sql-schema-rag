@@ -403,6 +403,62 @@ class ValidatorTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("secret_table", msg)
 
+    def test_reject_quoted_system_table(self) -> None:
+        # 引号/方括号/反引号/schema 前缀都不能绕过表白名单
+        for sql in (
+            'SELECT name FROM "sqlite_master"',
+            "SELECT name FROM [sqlite_master]",
+            "SELECT name FROM `sqlite_master`",
+            'SELECT name FROM main."sqlite_master"',
+        ):
+            ok, msg = validate(sql, self.catalog)
+            self.assertFalse(ok, sql)
+            self.assertIn("sqlite_master", msg)
+
+    def test_forbidden_word_in_string_or_comment_is_not_a_keyword(self) -> None:
+        # 字面量/注释里的 create、分号不是 SQL 关键字/语句分隔符
+        for sql in (
+            "SELECT 'create' AS x",
+            "SELECT 'delete' AS x FROM orders LIMIT 1",
+            "SELECT ';' AS x FROM orders LIMIT 1",
+            "SELECT order_id FROM orders -- create; DROP TABLE\nLIMIT 1",
+        ):
+            ok, msg = validate(sql, self.catalog)
+            self.assertTrue(ok, f"{sql}: {msg}")
+
+    def test_accept_quoted_table_and_cte(self) -> None:
+        ok, msg = validate('SELECT order_id FROM "orders" LIMIT 1', self.catalog)
+        self.assertTrue(ok, msg)
+        ok, msg = validate(
+            'WITH "ranked" AS (SELECT 1 AS x) SELECT x FROM "ranked"',
+            self.catalog,
+        )
+        self.assertTrue(ok, msg)
+
+    def test_quoted_denied_column_still_rejected(self) -> None:
+        ok, _ = validate(
+            'SELECT "customer_phone" FROM customers LIMIT 1',
+            self.catalog,
+            denied=("customer_phone",),
+            masked=("customer_phone",),
+        )
+        self.assertFalse(ok)
+        # 引号别名也不能绕过掩码列约束
+        ok, _ = validate(
+            'SELECT "customer_phone" AS "p" FROM customers LIMIT 1',
+            self.catalog,
+            masked=("customer_phone",),
+        )
+        self.assertFalse(ok)
+        # 字符串字面量里的同名列不应误报
+        ok, msg = validate(
+            "SELECT 'customer_phone' AS x FROM orders LIMIT 1",
+            self.catalog,
+            denied=("customer_phone",),
+            masked=("customer_phone",),
+        )
+        self.assertTrue(ok, msg)
+
     def test_accept_plain_select(self) -> None:
         ok, _ = validate("SELECT order_id FROM orders LIMIT 5", self.catalog)
         self.assertTrue(ok)

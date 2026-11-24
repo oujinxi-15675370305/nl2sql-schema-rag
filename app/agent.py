@@ -335,6 +335,106 @@ class ScriptedGenerator:
 FORBIDDEN = ("insert", "update", "delete", "drop", "alter", "create", "attach", "pragma", "vacuum")
 
 
+# 标识符：裸标识符，或 SQLite 支持的 "..." / `...` / [...] 引用形式。
+# 表名校验不能只抓 \w+：`FROM "sqlite_master"` 就是从这个缺口绕过白名单的。
+_IDENT = r'(?:"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[(?:[^\]]|\]\])*\]|[A-Za-z_][A-Za-z0-9_$]*)'
+_TABLE_REF = re.compile(
+    rf"\b(?:from|join)\s+({_IDENT})(?:\s*\.\s*({_IDENT}))?", re.I)
+_CTE_REF = re.compile(
+    rf"(?:\bwith\b|,)\s*({_IDENT})\s*(?:\([^)]*\))?\s+as\s*\(", re.I)
+
+
+def _mask_sql(sql: str, *, identifiers: bool = False) -> str:
+    """把字符串字面量/注释替换成空格；identifiers=True 时连引用标识符一起遮掉。
+
+    校验不能直接对原文跑正则：字符串里的 create 会被误杀，注释里的分号会被误判成
+    多语句，引号表名又能绕过 FROM/JOIN 提取。执行仍然用原始 SQL。
+    """
+    out: list[str] = []
+    i, n = 0, len(sql)
+    while i < n:
+        if sql.startswith("--", i):
+            end = sql.find("\n", i)
+            if end < 0:
+                out.append(" " * (n - i))
+                break
+            out.append(" " * (end - i))
+            i = end
+            continue
+        if sql.startswith("/*", i):
+            end = sql.find("*/", i + 2)
+            end = n if end < 0 else end + 2
+            out.append(" " * (end - i))
+            i = end
+            continue
+        ch = sql[i]
+        if ch == "'":
+            j = i + 1
+            while j < n:
+                if sql[j] == "'":
+                    if j + 1 < n and sql[j + 1] == "'":
+                        j += 2
+                        continue
+                    break
+                j += 1
+            end = min(j + 1, n)
+            out.append(" " * (end - i))
+            i = end
+            continue
+        if identifiers and ch in ('"', "`", "["):
+            close = '"' if ch == '"' else ("`" if ch == "`" else "]")
+            j = i + 1
+            while j < n:
+                if sql[j] == close:
+                    if j + 1 < n and sql[j + 1] == close:
+                        j += 2
+                        continue
+                    break
+                j += 1
+            end = min(j + 1, n)
+            out.append(" " * (end - i))
+            i = end
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _sql_words(sql: str) -> set[str]:
+    masked = _mask_sql(sql, identifiers=True).lower()
+    return set(re.findall(r"[a-z_][a-z0-9_]*", masked))
+
+
+def _unquote_ident(token: str) -> str:
+    token = token.strip()
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in ('"', "`", "]"):
+        inner = token[1:-1]
+        if token[0] == '"':
+            return inner.replace('""', '"').lower()
+        if token[0] == "`":
+            return inner.replace("``", "`").lower()
+        return inner.replace("]]", "]").lower()
+    return token.lower()
+
+
+def _name_ref(name: str) -> str:
+    """匹配裸列名或带引号列名；用于掩码列约束，不用于表名。"""
+    n = re.escape(name.lower())
+    return rf'(?:"{n}"|`{n}`|\[{n}\]|\b{n}\b)'
+
+
+def _table_refs(sql: str) -> set[str]:
+    """提取 FROM/JOIN 的物理表名；支持引号、方括号和 schema 前缀。"""
+    refs: set[str] = set()
+    for first, second in _TABLE_REF.findall(sql):
+        refs.add(_unquote_ident(second or first))
+    return refs
+
+
+def _cte_names(sql: str) -> set[str]:
+    return {_unquote_ident(name) for name in _CTE_REF.findall(sql)}
+
+
 def validate(
     sql: str,
     catalog: Catalog,
@@ -354,15 +454,18 @@ def validate(
     只放行只读的 WITH；DML 关键字仍然在 FORBIDDEN 里被拦。
     """
     s = sql.strip().rstrip(";")
-    low = s.lower()
+    # 对“去掉字符串/注释后”的文本做结构检查；原始 SQL 仍交给执行层。
+    scan = _mask_sql(s)
+    low = scan.lower()
     if not (low.startswith("select") or low.startswith("with")):
         return False, "只允许 SELECT 或 WITH ... SELECT"
     if low.startswith("with") and "select" not in low:
         return False, "只允许 SELECT 或 WITH ... SELECT"
-    if ";" in s:
+    if ";" in scan:
         return False, "只允许单条语句"
+    words = _sql_words(s)
     for word in FORBIDDEN:
-        if re.search(rf"\b{word}\b", low):
+        if word in words:
             return False, f"禁止的关键字：{word}"
 
     denied = tuple(n for n in denied if n)
@@ -377,28 +480,26 @@ def validate(
         if re.search(rf"\b{re.escape(name.lower())}\b", low):
             return False, "引用了无权访问的列"
     for name in masked:
-        pat = re.escape(name.lower())
-        # 改别名：客户手机号 AS p
-        if re.search(rf"\b{pat}\b\s+as\s+[a-z_][a-z0-9_]*", low):
+        ref = _name_ref(name)
+        # 改别名：客户手机号 AS p / AS "p"（引号别名也要拦）
+        if re.search(rf"{ref}\s+as\s+{_IDENT}", low):
             return False, "敏感字段不能改别名，请直接查询"
         # 无 AS 的别名：客户手机号 p（排除 FROM/IS 这类关键字当"别名"）
         if re.search(
-            rf"\b{pat}\b\s+(?!(?:from|where|group|order|limit|join|on|is|not|and|or|having|union|"
-            rf"collate|desc|asc)\b)[a-z_][a-z0-9_]*",
+            rf"{ref}\s+(?!(?:from|where|group|order|limit|join|on|is|not|and|or|having|union|"
+            rf"collate|desc|asc)\b){_IDENT}",
             low,
         ):
             return False, "敏感字段不能改别名，请直接查询"
         # 函数包裹 / 拼接：substr(customer_phone,...)、customer_phone || '-'
-        if re.search(rf"[a-z_][a-z0-9_]*\s*\([^)]*\b{pat}\b", low):
+        if re.search(rf"[a-z_][a-z0-9_]*\s*\([^)]*{ref}", low):
             return False, "敏感字段不能参与函数或表达式"
-        if re.search(rf"\b{pat}\b\s*(?:\|\||\+|-|\*|/)", low):
+        if re.search(rf"{ref}\s*(?:\|\||\+|-|\*|/)", low):
             return False, "敏感字段不能参与函数或表达式"
 
     known = {t.name for t in catalog.tables}
-    # WITH 里的 CTE 名字不是物理表：先摘出来，否则 `FROM ranked` 会被当成未知表
-    cte_names = set(re.findall(
-        r"(?:\bwith\b|,)\s*([a-z_][a-z0-9_]*)\s*(?:\([^)]*\))?\s+as\s*\(", low))
-    used = set(re.findall(r"\b(?:from|join)\s+([a-zA-Z_][a-zA-Z0-9_]*)", low)) - cte_names
+    cte_names = _cte_names(scan)
+    used = _table_refs(scan) - cte_names
     unknown = used - known
     if unknown:
         return False, f"未知的表：{', '.join(sorted(unknown))}"

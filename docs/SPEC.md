@@ -267,9 +267,9 @@ GET /api/health → { ok, tables, metrics, roles }
 | 页面离线基线 / 模型快照（2026-11-21） | ✅ 已完成 | 按钮改「跑离线基线」；`scripts/record_llm_eval.py` 生成 `eval/llm_result.json`（只读快照），`GET /api/eval/llm/last` 有则显示「上次模型评测」、无/损坏则隐藏；接口与测试均不调模型；当时 BIRD/Spider/DuSQL 仅方案评估；180 单测 |
 | 复杂问法评测（2026-11-22） | ✅ 已完成 | 13 条（12 可判定 + 1 归因未支持），`--complex` 单独统计、不进 CI；规则 0/12、`deepseek-chat` 曾 5 次 12/12，语义层后最新 3 次 12/11/12（C9 偶发；不当硬门槛）、回退 0；分组 GMV 口径见 README |
 | 公开集 Step 4（2026-11-25） | ✅ 已完成 | 独立 `benchmarks/bird_sqlite.py`；BIRD Mini-Dev SQLite **fresh 50 题**（seed 20261128，排除已跑 125 题）、`deepseek-chat`，**官方 EX 36/50（72%）**（strict 35/50）、0 题 SQL 执行失败、gold 失败 0；同题带描述+重试只有 31/50，已回退这两个默认；非官方 leaderboard，Spider/DuSQL 未接 |
-| 分析模式 MVP（2026-11-23） | ✅ 已完成 | `mode=analysis` 默认关闭；Planner 2–4 步 → 每步复用 `ask` → Synthesizer 引用 `[sN]`、失败/口径警告补“局限”；288 单测；每步重试默认 1、总预算从 Planner 计时；复购错误 HAVING 判步骤不可用；prompt v3.1 复杂单 SQL 最新 3 次 12/11/12，holdout 3/3×3；A/B 旧 8/12、10/12 仅历史，复核重跑 raw：chat 26/26 步/5.98s/coverage 1.00，flash 25/26 步/19.2s/coverage 0.88（`eval/analysis_ab.json`），默认不换模型；#6/#12 整单 pay_amount 按明细拆分不可加总，已加确定性警告 |
-| 语义层清理（2026-11-24） | ✅ 已完成 | 删 Planner 契约死代码（`metric/dimensions/grain/output_columns`、输出列警告、第二条重规划触发）；执行约束改走 `ask(hint=...)` → `SchemaContext.instructions` 独立 prompt 段；复购表 prompt 只在表进上下文时拼；`app/semantics.py` 收口占比/复购判定；`id_map` 只映射保留步骤；删 `analysis_replanned`；288 单测；A/B 两轮 chat 26/26 & 25/26 步、flash 24/25 & 25/26 步，份额题 C4/C11 恒 2/2 + 1.00 |
-| 自动结论 Step 3（2026-11-23） | ✅ 已完成 | `conclusion=true` 显式开启、默认关闭；只对 LLM 成功单 SQL 多调一次模型；只描述结果、不解释原因；规则/空结果/失败不调；多轮用改写问句；非布尔 400；分析模式不叠加；页面开关默认关；实测 1.5–1.9s；288 单测 |
+| 分析模式 MVP（2026-11-23） | ✅ 已完成 | `mode=analysis` 默认关闭；Planner 2–4 步 → 每步复用 `ask` → Synthesizer 引用 `[sN]`、失败/口径警告补“局限”；292 单测；每步重试默认 1、总预算从 Planner 计时；复购错误 HAVING 判步骤不可用；prompt v3.1 复杂单 SQL 最新 3 次 12/11/12，holdout 3/3×3；A/B 旧 8/12、10/12 仅历史，复核重跑 raw：chat 26/26 步/5.98s/coverage 1.00，flash 25/26 步/19.2s/coverage 0.88（`eval/analysis_ab.json`），默认不换模型；#6/#12 整单 pay_amount 按明细拆分不可加总，已加确定性警告 |
+| 语义层清理（2026-11-24） | ✅ 已完成 | 删 Planner 契约死代码（`metric/dimensions/grain/output_columns`、输出列警告、第二条重规划触发）；执行约束改走 `ask(hint=...)` → `SchemaContext.instructions` 独立 prompt 段；复购表 prompt 只在表进上下文时拼；`app/semantics.py` 收口占比/复购判定；`id_map` 只映射保留步骤；删 `analysis_replanned`；292 单测；A/B 两轮 chat 26/26 & 25/26 步、flash 24/25 & 25/26 步，份额题 C4/C11 恒 2/2 + 1.00 |
+| 自动结论 Step 3（2026-11-23） | ✅ 已完成 | `conclusion=true` 显式开启、默认关闭；只对 LLM 成功单 SQL 多调一次模型；只描述结果、不解释原因；规则/空结果/失败不调；多轮用改写问句；非布尔 400；分析模式不叠加；页面开关默认关；实测 1.5–1.9s；292 单测 |
 
 ## 8. 开发约定
 
