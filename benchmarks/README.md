@@ -25,10 +25,9 @@ unzip benchmarks/.data/minidev.zip -d benchmarks/.data/minidev
 ## 跑 fresh holdout
 
 ```bash
-python -m benchmarks.bird_sqlite --limit 50 --seed 20261127 \
-  --exclude benchmarks/results/bird_mini_dev.json \
-  --exclude benchmarks/results/bird_dev.json \
-  --out benchmarks/results/bird_holdout.json
+# 历史中间结果已移出仓库；下面用新 seed，和最终 36/50 不是同一批
+python -m benchmarks.bird_sqlite --limit 50 --seed 20261201 \
+  --out benchmarks/results/bird_check.json
 ```
 
 `--exclude` 排除已跑过的结果文件，保证 holdout 没在调参时看过。不要在同一批题上调完 prompt 再报“提升”。
@@ -54,21 +53,23 @@ python -m benchmarks.bird_sqlite --limit 50 --seed 20261127 \
 | 初始 50（seed 20261125） | 旧 harness，DDL only | — | 27/50 | 历史，口径不可直接比 |
 | dev 25（seed 20261126，排除前 50） | 描述开，重试 1 | 13/25 | 11/25 | 调参用 |
 | dev 25（同题） | 描述关，重试 1 | 14/25 | 14/25 | 描述没有净收益 |
-| **fresh holdout 50（seed 20261127，排除前 75）** | **描述开，重试 1** | **24/50** | 23/50 | **最终干净数字** |
+| 对比 50（seed 20261127，排除前 75） | 描述开，重试 1 | 24/50 | 23/50 | 中间版本 |
+| **fresh 50（seed 20261128，排除前 125）** | **DDL only，无重试** | **36/50** | 35/50 | **最终干净数字** |
+| 同一批 fresh 50 | 描述开，重试 1 | 31/50 | 30/50 | **更差，已回退为默认关** |
 
-结论：1+2+3（官方 EX、描述/值样例、执行重试）**没有带来可复现的提升**；描述在 dev 上反而少 1 题，重试只救回少数执行错误。4/5 没有直接上 holdout。
+结论：1+2+3 里的“描述/值样例 + 执行重试”在同一批 fresh 题上反而更差（31 vs 36），所以最终回退了这两个默认；保留 **official EX** 和 `--exclude` fresh sampling。4/5 没有继续调。
 
 ## 只读与重试
 
 - 数据库以 `mode=ro` 打开，并设置 `PRAGMA query_only=ON`、`temp_store=MEMORY`；
 - 只接受 `SELECT` / `WITH` 开头；
 - 30s 执行超时；
-- 执行错误默认重试 1 次（`--retry-errors 0` 可关）；重试只修列名/语法/JOIN，不换查询语义。
+- 执行错误默认不重试（`--retry-errors 1` 是实验项）；重试只修列名/语法/JOIN。
 
 ## 描述/值样例
 
-BIRD 的 `database_description/*.csv` 会拼进 DDL 的列注释（描述 + value description，截断）。
-可用 `--no-descriptions` 关闭；dev A/B 显示当前没有净收益，所以不要把“带描述”写成必然更好。
+BIRD 的 `database_description/*.csv` 可拼进 DDL 的列注释（描述 + value description，截断）。
+默认关；`--descriptions` 是实验项。dev 与 fresh 对比都没有净收益，所以不默认开。
 
 ## 边界
 

@@ -266,7 +266,7 @@ def _generate_sql(item: dict, ddl: str, *, model: str, timeout_s: float,
 
 
 def run_case(item: dict, db_root: Path, *, model: str, timeout_s: float, index: int,
-             retry_errors: int = 1, descriptions: bool = True) -> CaseResult:
+             retry_errors: int = 0, descriptions: bool = False) -> CaseResult:
     result = CaseResult(id=index, source_index=int(item.get("_source_index", index)),
                         db_id=str(item.get("db_id") or ""),
                         question=str(item.get("question") or ""),
@@ -339,10 +339,10 @@ def main(argv=None) -> int:
     parser.add_argument("--seed", type=int, default=20261125)
     parser.add_argument("--model", default=None)
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S)
-    parser.add_argument("--retry-errors", type=int, default=1,
-                        help="SQL 执行失败时最多重试几次（默认 1）")
-    parser.add_argument("--no-descriptions", action="store_false", dest="descriptions",
-                        help="不把 BIRD database_description 拼进 prompt")
+    parser.add_argument("--retry-errors", type=int, default=0,
+                        help="SQL 执行失败时最多重试几次（默认 0；1 为实验项）")
+    parser.add_argument("--descriptions", action="store_true", dest="descriptions",
+                        help="把 BIRD database_description 拼进 prompt（实验项，默认关）")
     parser.add_argument("--exclude", action="append", default=[],
                         help="排除已有结果文件里的问题（可重复，保证 holdout 没跑过）")
     parser.add_argument("--out", default=str(DEFAULT_OUT))
