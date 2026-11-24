@@ -10,6 +10,7 @@ from app.agent import (
     LLMGenerator,
     QueryTimeout,
     ScriptedGenerator,
+    _shape_feedback,
     ask,
     build_context,
     execute,
@@ -186,6 +187,29 @@ class SqlShapeGuardTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.catalog = load_catalog()
 
+    def test_grouped_top_n_guard(self) -> None:
+        bad = ("SELECT p.brand, p.product_name, SUM(o.pay_amount) AS gmv FROM orders o "
+               "JOIN order_items i ON i.order_id = o.order_id "
+               "JOIN products p ON p.product_id = i.product_id "
+               "WHERE o.status = 'paid' GROUP BY p.brand, p.product_name "
+               "ORDER BY gmv DESC LIMIT 10")
+        self.assertIn("分组内", _shape_feedback(bad, {}, "每个品牌销售额前两名商品"))
+        good = ("WITH ranked AS (SELECT p.brand, p.product_name, SUM(o.pay_amount) AS gmv, "
+                "ROW_NUMBER() OVER (PARTITION BY p.brand ORDER BY SUM(o.pay_amount) DESC) AS rn "
+                "FROM orders o JOIN order_items i ON i.order_id = o.order_id "
+                "JOIN products p ON p.product_id = i.product_id "
+                "WHERE o.status = 'paid' GROUP BY p.brand, p.product_name) "
+                "SELECT brand, product_name, gmv FROM ranked WHERE rn <= 2")
+        self.assertEqual(_shape_feedback(good, {}, "每个品牌销售额前两名商品"), "")
+
+    def test_month_over_month_is_not_grouped_top_n(self) -> None:
+        # “前一个月”是时间词，不是“前 N 名”；不能触发分组 Top-N 守卫
+        sql = ("SELECT month, gmv, LAG(gmv) OVER (ORDER BY month) AS mom "
+               "FROM (SELECT substr(o.order_date,1,7) AS month, SUM(o.pay_amount) AS gmv "
+               "FROM orders o WHERE o.status = 'paid' GROUP BY month)")
+        question = "今年每个月的GMV和环比（(当月-前一个月)/前一个月，保留4位小数）"
+        self.assertEqual(_shape_feedback(sql, {}, question), "")
+
     def test_extra_filter_column_triggers_rewrite(self) -> None:
         bad = (
             "SELECT r.region_name, ROUND(SUM(o.pay_amount), 2) AS gmv "
@@ -225,6 +249,12 @@ class PromptContextTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.catalog = load_catalog()
         cls.retriever = SchemaRetriever(cls.catalog)
+
+    def test_repurchase_table_only_for_repurchase_queries(self) -> None:
+        normal, _ = build_context("有多少客户", self.catalog, self.retriever)
+        self.assertNotIn("repurchase_customers", [h.key for h in normal.tables])
+        repeat, _ = build_context("复购客户数", self.catalog, self.retriever)
+        self.assertIn("repurchase_customers", [h.key for h in repeat.tables])
 
     def test_ddl_includes_join_keys_and_relations(self) -> None:
         ctx, _ = build_context("各地区的销量", self.catalog, self.retriever)

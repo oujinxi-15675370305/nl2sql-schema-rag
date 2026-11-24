@@ -41,6 +41,9 @@ def load_catalog(path: str | Path | None = None) -> Catalog:
             sql=m["sql"],
             synonyms=tuple(m.get("synonyms", ())),
             requires=tuple(m.get("requires", ())),
+            additive=bool(m.get("additive", True)),
+            grain=str(m.get("grain", "")).strip(),
+            warning=str(m.get("warning", "")).strip(),
         )
         for m in raw.get("metrics", [])
     )

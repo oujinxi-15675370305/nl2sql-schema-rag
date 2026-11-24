@@ -31,7 +31,14 @@ COMPLEX_CASES = ROOT / "eval" / "complex_cases.json"
 
 
 def answer_numbers(text: str) -> list[float]:
+    """抽取答案里的数字；把 Unicode 负号（U+2212 等）归一成 ASCII '-'。
+
+    C8 的环比是 `−0.1627`（U+2212），旧正则只抓正数，导致 coverage 少算 3 个负值；
+    这不是答案缺数，是度量脚本的 bug。
+    """
     text = (text or "").replace(",", "")
+    for minus in ("\u2212", "\uFE63", "\uFF0D"):  # − / ﹣ / －
+        text = text.replace(minus, "-")
     values: list[float] = []
     for raw in re.findall(r"-?\d+(?:\.\d+)?\s*%?", text):
         pct = "%" in raw

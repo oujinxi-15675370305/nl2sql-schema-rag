@@ -264,7 +264,7 @@ Step 2 没有引入 LangGraph/ReAct：新增 `app/analysis.py`，Planner 只看�
 
 1. **默认关闭**：页面开关默认关，HTTP 不传 `mode` 就是快路径，响应结构不变。
 2. **失败不隐藏**：澄清/越权/预算不足标 `skipped`；Planner 失败回退单 SQL 并带 `analysis_error`；Synthesizer 没有成功步骤时不调模型，直接说“当前结果不足以判断”；模型漏写的失败步骤由代码补进“局限”。
-3. **先测量再换模型**：Planner/Synthesizer 用 `ANALYSIS_MODEL`（默认同 `LLM_MODEL`）。供应商 `/models` 只列 `deepseek-flash` / `deepseek-v4-pro`，`deepseek-reasoner` 请求会被路由到 flash（响应 `model=deepseek-flash`），所以旧文档里的 reasoner A/B 实际跑的就是 flash。2026-11-22 扩到 12 条 complex（SQL 仍 chat，prompt v3）的历史数字是单次人工抽样、无原始产物：`deepseek-chat` 完整正确 8/12、平均 5.9s、completion 4,976；`deepseek-flash` 完整正确 10/12、平均 15.3s、completion 25,394；当次人工判“无错数”，但审核复跑发现 chat 的 #5 曾把全部付费客户当复购（错数），所以这个“0 错数”不能当稳定结论。flash 多完成 #6/#12 全量，但延迟 2.6×、completion 5.1×，**不换默认模型**。prompt v3.1 复核重跑（原始答案 `eval/analysis_ab.json`）raw：chat 26/26 步、5.98s、coverage 0.71；flash 25/27 步、16.85s、coverage 0.63；仍不换默认，也不把单轮 coverage 当稳定质量。prompt v3 曾把单 SQL complex 从 8–9/12 提升到 **12/12**（3 次全过），但它新增的 4 条示例与 complex 题面/公式重叠（#2/#9/#11 原题、#3 季度公式），是开发集口径。v3.1 移除这 4 条示例、保留通用形状/口径规则后，3 次均为 **11/12**（只剩 #13），这是干净数字。另写了 3 条没进示例的 holdout（地区品牌 Top-2 / 品牌销量占比 / 退款率最低 Top-3），LLM **3/3×3**、规则对照 **0/3**；样本仍小，不能单独证明泛化。另试了 `deepseek-v4-pro` 只做 Planner/Synthesizer 的 2 题：Q1 18.6s 正确，Q2 73s、10,217 completion tokens，30s 预算下会先超时，不采用。千问（DashScope）：`qwen3.8-flash` 3/3 可用但平均 40.5s、Q2 单题 55s；`qwen3.7-flash` 2/3 且 Q2 错数未标注、平均 50.4s；都只能做“愿意等”的可选深分析，不做默认（12 条全量因 key 到期未跑）。分析模型可单独接另一家 OpenAI 兼容服务（`ANALYSIS_BASE_URL` / `ANALYSIS_API_KEY`）。
+3. **先测量再换模型**：Planner/Synthesizer 用 `ANALYSIS_MODEL`（默认同 `LLM_MODEL`）。供应商 `/models` 只列 `deepseek-flash` / `deepseek-v4-pro`，`deepseek-reasoner` 请求会被路由到 flash（响应 `model=deepseek-flash`），所以旧文档里的 reasoner A/B 实际跑的就是 flash。2026-11-22 扩到 12 条 complex（SQL 仍 chat，prompt v3）的历史数字是单次人工抽样、无原始产物：`deepseek-chat` 完整正确 8/12、平均 5.9s、completion 4,976；`deepseek-flash` 完整正确 10/12、平均 15.3s、completion 25,394；当次人工判“无错数”，但审核复跑发现 chat 的 #5 曾把全部付费客户当复购（错数），所以这个“0 错数”不能当稳定结论。flash 多完成 #6/#12 全量，但延迟 2.6×、completion 5.1×，**不换默认模型**。prompt v3.1 复核重跑（原始答案 `eval/analysis_ab.json`）raw：chat 25/27 步、5.8s、coverage 1.00；flash 28/28 步、17.8s、coverage 0.92；C8 旧 coverage 0.7692 是 `answer_numbers()` 不识别 Unicode 负号（U+2212），修复后 C8=1.0，不是模型缺数。仍不换默认，也不把单轮 coverage 当稳定质量。prompt v3 曾把单 SQL complex 从 8–9/12 提升到 **12/12**（3 次全过），但它新增的 4 条示例与 complex 题面/公式重叠（#2/#9/#11 原题、#3 季度公式），是开发集口径。v3.1 移除这 4 条示例后多次运行 9–12、常见 11；追加复购/阈值客户规则后 5 次 **12/12**，但规则对 C5/C13 有针对性，仍可能过拟合，不能当泛化门槛。另写了 3 条没进示例的 holdout（地区品牌 Top-2 / 品牌销量占比 / 退款率最低 Top-3），LLM **3/3×3**、规则对照 **0/3**；样本仍小，不能单独证明泛化。另试了 `deepseek-v4-pro` 只做 Planner/Synthesizer 的 2 题：Q1 18.6s 正确，Q2 73s、10,217 completion tokens，30s 预算下会先超时，不采用。千问（DashScope）：`qwen3.8-flash` 3/3 可用但平均 40.5s、Q2 单题 55s；`qwen3.7-flash` 2/3 且 Q2 错数未标注、平均 50.4s；都只能做“愿意等”的可选深分析，不做默认（12 条全量因 key 到期未跑）。分析模型可单独接另一家 OpenAI 兼容服务（`ANALYSIS_BASE_URL` / `ANALYSIS_API_KEY`）。
 
 A/B 第一轮抓到两个真问题，按“先测量”改的是提示词/输入，不是期望：
 
@@ -273,7 +273,7 @@ A/B 第一轮抓到两个真问题，按“先测量”改的是提示词/输入
 
 已知没解决：Planner 仍可能拆得不好（chat 在月度环比题上把“去年12月”拆成独立步骤，却没生成 LAG 环比，结论只能说“缺计算步骤”；#13 仍可能把地区汇总当客户筛选）；步骤 `ok=true` 只代表 SQL 跑通，不代表业务口径对；50 行之外仍可能漏数据。
 
-2026-11-24 审核修复：复购题若把 `HAVING` 放在地区分组上（返回地区全部客户），代码直接判该步不可用，结论不再把全部客户当复购；每步重试降到 1（`ANALYSIS_STEP_MAX_REPAIR`），总预算从 Planner 开始计时、耗尽后不调综合模型；测试补到 238。prompt v3.1 去掉了 4 条与 complex 题面重叠的示例，complex 干净数字 11/12。
+2026-11-24 审核修复：复购题若把 `HAVING` 放在地区分组上（返回地区全部客户），代码直接判该步不可用，结论不再把全部客户当复购；每步重试降到 1（`ANALYSIS_STEP_MAX_REPAIR`），总预算从 Planner 开始计时、耗尽后不调综合模型；测试补到 259。prompt v3.1 去掉了 4 条与 complex 题面重叠的示例；追加复购/阈值客户规则后 complex 5 次 12/12（C5/C13 修复），但规则有针对性，仍可能过拟合。`analysis_ab.answer_numbers` 增加 Unicode 负号归一，C8 coverage 从 0.7692 修正为 1.0。
 
 ## 2026-11-23 Step 3 自动结论：默认关闭，只描述结果
 
@@ -283,9 +283,12 @@ A/B 第一轮抓到两个真问题，按“先测量”改的是提示词/输入
 
 - 只对 `intent=ask`、`ok=true`、`engine=llm` 且有行的查询调用；规则 fallback、空结果、SQL 失败不调用；
 - 结论失败只写 `conclusion_error`，不把成功的 SQL 变成失败；
-- prompt 只给结果，不给 schema，不允许写 SQL；只描述结果、不解释原因，空/NULL 直接说空；最多 50 行，截断标注；
-- 默认关闭的代价是每次查询多约 0.5–0.9s；换来的是不把自动结论强加给所有用户。
-- 测试全部 mock，不碰真实模型；页面开关关闭时快路径数字不变。
+- prompt 只给结果，不给 schema，不允许写 SQL；只描述结果、不解释原因，空/NULL 直接说空；最多 50 行，截断标注；结果文本明确是数据、不是指令；
+- 多轮用 `plan.rewritten_question`（如“那上个月呢”带“承接上文：GMV、华东”），结论不丢上下文；
+- `conclusion` 必须是布尔，非布尔 400；分析模式即使 API 同时传 `conclusion=true` 也不叠加；
+- 代码只做长度/空白检查；1–3 句、不解释原因是 prompt 约束 + 人工验收；
+- 开启的代价是每次查询多约 0.7–1.1s；换来的是不把自动结论强加给所有用户。
+- 测试全部 mock，不碰真实模型；259 单测；页面开关关闭时快路径数字不变。
 
 ## 还没想清楚
 

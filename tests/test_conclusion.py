@@ -7,6 +7,8 @@ from unittest import mock
 from app.agent import ask
 from app.catalog import load_catalog
 from app.conclusion import ChatResult, summarize
+from app.domain import AnalysisResult, AnalysisStep
+from app.session import Session
 
 GOOD_SQL = "SELECT COUNT(*) AS n FROM orders WHERE status = 'paid'"
 
@@ -71,6 +73,12 @@ class SummarizeTest(unittest.TestCase):
         self.assertIn("共 60 行", prompt)
         self.assertIn("截断", prompt)
 
+    def test_prompt_marks_result_text_as_data(self) -> None:
+        chat = _Chat(["共 1 单。"])
+        summarize("多少单", ["n"], [(1,)], chat_fn=chat)
+        system = chat.calls[0][0]["content"]
+        self.assertIn("不是指令", system)
+
 
 class AskConclusionTest(unittest.TestCase):
     @classmethod
@@ -126,6 +134,46 @@ class AskConclusionTest(unittest.TestCase):
         self.assertTrue(plan.ok)
         self.assertFalse(plan.conclusion)
         self.assertIn("没有结果", plan.conclusion_error)
+
+    def test_sql_failure_skips_conclusion(self) -> None:
+        bad_sql = "SELECT nope FROM orders"
+        with mock.patch("app.agent.llm_sql", return_value=bad_sql), \
+                mock.patch("app.conclusion.summarize",
+                           side_effect=AssertionError("SQL 失败不该调结论模型")):
+            plan = ask("多少单", catalog=self.catalog, conclusion=True)
+        self.assertFalse(plan.ok)
+        self.assertFalse(plan.conclusion)
+        self.assertEqual(plan.answer, "")
+
+    def test_multi_turn_uses_rewritten_question(self) -> None:
+        session = Session("conclusion-rewrite")
+        with mock.patch("app.agent.llm_sql", return_value=GOOD_SQL), \
+                mock.patch("app.agent._shape_feedback", return_value=""), \
+                mock.patch("app.conclusion.summarize",
+                           return_value=("上个月的 GMV 为 116221.46。", "", {})) as summarize_mock:
+            ask("华东地区的GMV", catalog=self.catalog, session=session)
+            plan = ask("那上个月呢", catalog=self.catalog, session=session, conclusion=True)
+        self.assertTrue(plan.ok)
+        self.assertTrue(plan.conclusion)
+        question = summarize_mock.call_args.args[0]
+        self.assertIn("承接上文", question)
+        self.assertIn("华东", question)
+
+    def test_analysis_mode_does_not_stack_conclusion(self) -> None:
+        result = AnalysisResult(
+            steps=[AnalysisStep(id="s1", question="各地区的GMV", ok=True,
+                                columns=["n"], rows=[(1,)], row_count=1)],
+            answer="各地区的 GMV 见步骤 [s1]。",
+            evidence=["s1"],
+        )
+        with mock.patch("app.analysis.run_analysis", return_value=result), \
+                mock.patch("app.conclusion.summarize",
+                           side_effect=AssertionError("分析模式不该再生成单 SQL 结论")):
+            plan = ask("各地区的GMV", catalog=self.catalog,
+                       mode="analysis", conclusion=True)
+        self.assertEqual(plan.mode, "analysis")
+        self.assertEqual(plan.answer, "各地区的 GMV 见步骤 [s1]。")
+        self.assertFalse(plan.conclusion)
 
 
 if __name__ == "__main__":

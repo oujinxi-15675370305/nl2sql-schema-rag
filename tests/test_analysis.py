@@ -40,6 +40,17 @@ VALID_PLAN = json.dumps({
     "answer_instructions": "先总量后退款率，数字都标来源",
 }, ensure_ascii=False)
 
+CONTRACT_PLAN = json.dumps({
+    "subquestions": [
+        {"id": "a", "question": "各地区的GMV", "purpose": "总量", "depends_on": [],
+         "metric": "gmv", "dimensions": ["region_name"], "grain": "region",
+         "output_columns": ["region_name", "gmv"]},
+        {"id": "b", "question": "各地区的退款率", "purpose": "退款", "depends_on": [],
+         "metric": "refund_rate", "dimensions": ["region_name"], "grain": "region",
+         "output_columns": ["region_name", "refund_rate"]},
+    ],
+}, ensure_ascii=False)
+
 
 def _reply(text: str, prompt: int = 0, completion: int = 0) -> ChatResult:
     return ChatResult(text=text, prompt_tokens=prompt, completion_tokens=completion)
@@ -63,6 +74,14 @@ class ScriptedChat:
 
 
 class PlannerTest(unittest.TestCase):
+    def test_contract_fields_are_kept(self) -> None:
+        out = plan("各地区的GMV和退款率", chat_fn=ScriptedChat([CONTRACT_PLAN]))
+        self.assertEqual(out.error, "")
+        self.assertEqual(out.steps[0]["metric"], "gmv")
+        self.assertEqual(out.steps[0]["grain"], "region")
+        self.assertEqual(out.steps[0]["output_columns"], ["region_name", "gmv"])
+        self.assertEqual(out.steps[1]["dimensions"], ["region_name"])
+
     def test_valid_json(self) -> None:
         out = plan("各地区的GMV和退款率", chat_fn=ScriptedChat([VALID_PLAN]))
         self.assertEqual(out.error, "")
@@ -154,6 +173,15 @@ class SqlWarningTest(unittest.TestCase):
         sql = ("SELECT SUM(CASE WHEN o.status = 'paid' THEN o.pay_amount ELSE 0 END), "
                "SUM(CASE WHEN o.status = 'refunded' THEN 1 ELSE 0 END) FROM orders o")
         self.assertEqual(_sql_warning(sql), "")
+
+    def test_pay_amount_join_items_warns_even_with_paid(self) -> None:
+        sql = ("SELECT p.category, SUM(o.pay_amount) FROM orders o "
+               "JOIN order_items i ON i.order_id = o.order_id "
+               "JOIN products p ON p.product_id = i.product_id "
+               "WHERE o.status = 'paid' GROUP BY p.category")
+        warning = _sql_warning(sql)
+        self.assertIn("不可跨组相加", warning)
+        self.assertIn("一致性", warning)
 
     def test_item_amount_does_not_warn(self) -> None:
         self.assertEqual(_sql_warning("SELECT SUM(i.item_amount) FROM order_items i"), "")
@@ -511,6 +539,58 @@ class AgentAnalysisModeTest(unittest.TestCase):
         self.assertEqual(plan.intent, "clarify")
         self.assertEqual(plan.answer, plan.reply)
         self.assertEqual(plan.steps, [])
+
+
+class SemanticContractTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.catalog = load_catalog()
+
+    def test_semantic_metadata_and_repurchase_table(self) -> None:
+        self.assertEqual(self.catalog.metric("gmv").grain, "order")
+        self.assertTrue(self.catalog.metric("gmv").additive)
+        self.assertIn("不能直接相加", self.catalog.metric("gmv").warning)
+        self.assertFalse(self.catalog.metric("aov").additive)
+        table = self.catalog.table("repurchase_customers")
+        self.assertIsNotNone(table)
+        self.assertEqual([c.name for c in table.columns], ["customer_id", "region_id", "order_count"])
+
+    def test_executor_passes_contract_and_warns_on_missing_column(self) -> None:
+        captured: list[str] = []
+
+        def fake_ask(question, **kwargs):
+            captured.append(question)
+            return SQLPlan(question=question, intent="ask", ok=True,
+                           sql="SELECT r.region_name, SUM(o.pay_amount) AS gmv "
+                               "FROM orders o JOIN regions r ON r.region_id = o.region_id "
+                               "WHERE o.status = 'paid' GROUP BY r.region_name",
+                           columns=["region_name", "gmv"], rows=[("华东", 1)], engine="llm")
+
+        steps = execute_steps(
+            [{"question": "各地区的GMV", "metric": "gmv",
+              "dimensions": ["region_name"], "grain": "region",
+              "output_columns": ["region_name", "sales"]}],
+            ask_fn=fake_ask, catalog=self.catalog, retriever=None, role="analyst",
+        )
+        self.assertIn("规划约束", captured[0])
+        self.assertIn("指标=gmv", captured[0])
+        self.assertIn("规划要求输出列", steps[0].warning)
+
+    def test_executor_contract_columns_match_has_no_warning(self) -> None:
+        def fake_ask(question, **kwargs):
+            return SQLPlan(question=question, intent="ask", ok=True,
+                           sql="SELECT r.region_name, SUM(o.pay_amount) AS gmv "
+                               "FROM orders o JOIN regions r ON r.region_id = o.region_id "
+                               "WHERE o.status = 'paid' GROUP BY r.region_name",
+                           columns=["region_name", "gmv"], rows=[("华东", 1)], engine="llm")
+
+        steps = execute_steps(
+            [{"question": "各地区的GMV", "metric": "gmv",
+              "dimensions": ["region_name"], "grain": "region",
+              "output_columns": ["region_name", "gmv"]}],
+            ask_fn=fake_ask, catalog=self.catalog, retriever=None, role="analyst",
+        )
+        self.assertEqual(steps[0].warning, "")
 
 
 if __name__ == "__main__":

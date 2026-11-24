@@ -115,6 +115,12 @@ class AskApiTest(unittest.TestCase):
         self.assertEqual(data["answer"], "")
         self.assertFalse(data["conclusion"])
 
+    def test_conclusion_must_be_bool(self) -> None:
+        # 防止字符串 "false" 被 bool() 当成 true，意外多调一次结论模型
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self._post("各地区的GMV", conclusion="false")
+        self.assertEqual(ctx.exception.code, 400)
+
     def test_conclusion_contract(self) -> None:
         plan = SQLPlan(
             question="各地区的GMV", ok=True, intent="ask", engine="llm",

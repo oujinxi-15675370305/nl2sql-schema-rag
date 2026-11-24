@@ -3,7 +3,9 @@
     ["orders.customer_id", "customers.customer_id"],
     ["orders.region_id", "regions.region_id"],
     ["order_items.order_id", "orders.order_id"],
-    ["order_items.product_id", "products.product_id"]
+    ["order_items.product_id", "products.product_id"],
+    ["repurchase_customers.customer_id", "customers.customer_id"],
+    ["repurchase_customers.region_id", "regions.region_id"]
   ],
   "tables": [
     {
@@ -55,6 +57,16 @@
       ]
     },
     {
+      "name": "repurchase_customers",
+      "comment": "复购客户（已支付订单数 >= 2），一行一个客户；按客户所属地区统计",
+      "synonyms": ["复购客户", "复购", "回头客", "复购名单", "复购客户数"],
+      "columns": [
+        {"name": "customer_id", "type": "TEXT", "comment": "客户编号", "is_dimension": true},
+        {"name": "region_id", "type": "INTEGER", "comment": "客户所属地区编号", "is_dimension": true},
+        {"name": "order_count", "type": "INTEGER", "comment": "已支付订单数", "is_measure": true}
+      ]
+    },
+    {
       "name": "customers",
       "comment": "客户主数据，一行一个客户",
       "synonyms": ["客户", "顾客", "会员"],
@@ -67,11 +79,11 @@
     }
   ],
   "metrics": [
-    {"name": "gmv", "comment": "成交总额：已支付订单的实付金额之和", "synonyms": ["GMV", "gmv", "成交额", "销售额", "营收", "交易额"], "requires": ["orders.pay_amount"], "sql": "SUM(o.pay_amount)"},
-    {"name": "order_count", "comment": "订单数：已支付订单的数量", "synonyms": ["订单数", "单量", "订单量", "多少单"], "requires": ["orders.order_id"], "sql": "COUNT(DISTINCT o.order_id)"},
-    {"name": "aov", "comment": "客单价：成交总额 / 订单数", "synonyms": ["客单价", "平均订单金额", "均价"], "requires": ["orders.pay_amount"], "sql": "ROUND(SUM(o.pay_amount) * 1.0 / COUNT(DISTINCT o.order_id), 2)"},
-    {"name": "refund_rate", "comment": "退款率：退款订单数 / 全部订单数（按订单当前状态统计）", "synonyms": ["退款率", "退货率"], "requires": ["orders.refund_amount"], "sql": "ROUND(SUM(CASE WHEN o.status = 'refunded' THEN 1 ELSE 0 END) * 1.0 / COUNT(DISTINCT o.order_id), 4)"},
-    {"name": "units", "comment": "销量：商品件数之和", "synonyms": ["销量", "件数", "卖了多少件"], "requires": ["order_items.quantity"], "sql": "SUM(i.quantity)"},
-    {"name": "customer_count", "comment": "客户数：有成交的客户数（按客户去重）", "synonyms": ["客户数", "客户数量", "多少客户", "多少个客户", "客户人数"], "requires": ["customers.customer_id"], "sql": "COUNT(DISTINCT c.customer_id)"}
+    {"name": "gmv", "comment": "成交总额：已支付订单的实付金额之和", "synonyms": ["GMV", "gmv", "成交额", "销售额", "营收", "交易额"], "requires": ["orders.pay_amount"], "sql": "SUM(o.pay_amount)", "additive": true, "grain": "order", "warning": "整单口径；按品类/品牌拆分需订单行分摊，不能直接相加"},
+    {"name": "order_count", "comment": "订单数：已支付订单的数量", "synonyms": ["订单数", "单量", "订单量", "多少单"], "requires": ["orders.order_id"], "sql": "COUNT(DISTINCT o.order_id)", "additive": true, "grain": "order"},
+    {"name": "aov", "comment": "客单价：成交总额 / 订单数", "synonyms": ["客单价", "平均订单金额", "均价"], "requires": ["orders.pay_amount"], "sql": "ROUND(SUM(o.pay_amount) * 1.0 / COUNT(DISTINCT o.order_id), 2)", "additive": false, "grain": "order", "warning": "比率指标，不能跨组相加或直接平均"},
+    {"name": "refund_rate", "comment": "退款率：退款订单数 / 全部订单数（按订单当前状态统计）", "synonyms": ["退款率", "退货率"], "requires": ["orders.refund_amount"], "sql": "ROUND(SUM(CASE WHEN o.status = 'refunded' THEN 1 ELSE 0 END) * 1.0 / COUNT(DISTINCT o.order_id), 4)", "additive": false, "grain": "order", "warning": "比率指标，不能跨组相加或直接平均"},
+    {"name": "units", "comment": "销量：商品件数之和", "synonyms": ["销量", "件数", "卖了多少件"], "requires": ["order_items.quantity"], "sql": "SUM(i.quantity)", "additive": true, "grain": "order_item"},
+    {"name": "customer_count", "comment": "客户数：有成交的客户数（按客户去重）", "synonyms": ["客户数", "客户数量", "多少客户", "多少个客户", "客户人数"], "requires": ["customers.customer_id"], "sql": "COUNT(DISTINCT c.customer_id)", "additive": false, "grain": "customer", "warning": "去重计数，跨组求和可能重复计算客户"}
   ]
 }

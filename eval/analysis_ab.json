@@ -7,18 +7,21 @@
    "steps": 2,
    "ok_steps": 2,
    "skipped": 0,
-   "warnings": [],
+   "warnings": [
+    "整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入；分组 GMV 不可跨组相加，也不能与单维合计做一致性断言",
+    "整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入；分组 GMV 不可跨组相加，也不能与单维合计做一致性断言"
+   ],
    "analysis_error": "",
-   "elapsed_ms": 6119,
+   "elapsed_ms": 6126,
    "usage": {
-    "prompt_tokens": 1308,
-    "completion_tokens": 496
+    "prompt_tokens": 1507,
+    "completion_tokens": 435
    },
    "coverage": 1.0,
-   "answer": "先核对口径：s1 按品类分组、限定华东且已支付订单，与“华东各品类销售额排序”一致，可用于确定前三品类；s2 先取前三品类，再按品类+商品分组汇总，分组粒度与“每个品类下各商品销售额”一致，可用于取每品类前两名 [s1][s2]。两步均使用整单 pay_amount 汇总，口径一致；但该口径下按品类、商品拆分后的数值不可跨组相加，也不能当作可分摊销售额或因果证据。\n\n按 s1，华东销售额前三的品类依次是家电（441996.96）、服饰（408817.14）、数码（403841.94），食品为 320303.33，未进入前三 [s1]。在 s2 中对应这三个品类取销售额前两名商品：家电为吹风机（92248.47）和空气炸锅（89617.72）；服饰为冲锋衣（90164.02）和速干T恤（87130.19）；数码为机械键盘（109791.43）和路由器（78257.84）[s2]。s2 结果中品类名称与商品归属一致，且各品类内已按销售额降序排列，未出现需要额外处理的并列情况 [s2]。\n\n局限：s1、s2 的 gmv 均为整单 pay_amount 口径，按品类/商品拆分后不可跨组相加，不能视为可加分摊销售额 [s1][s2]；当前结果未提供并列时的进一步稳定排序规则说明，若存在未展示的并列，前两名取舍依据不足。",
+   "answer": "根据 s1，华东地区销售额最高的三个品类依次是家电（441996.96）、服饰（408817.14）、数码（403841.94），食品为 320303.33，未进入前三 [s1]。s1 的分组粒度为品类、过滤条件为已支付订单且地区为华东，与子问题一致，但其口径警告需保留 [s1]。\n\n根据 s2，这三个品类下销售额前两名的商品分别为：家电—吹风机 92248.47、空气炸锅 89617.72；数码—机械键盘 109791.43、路由器 78257.84；服饰—冲锋衣 90164.02、速干T恤 87130.19 [s2]。s2 的分组粒度为品类加商品名，与子问题一致；各品类内商品按销售额降序排列，所列前两名与第三名之间均无并列，因此无需额外并列处理 [s2]。\n\n局限：s1 与 s2 均带口径警告，即整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入，分组 GMV 不可跨组相加，也不能与单维合计做一致性断言，故上述数值只能按各自口径并列展示，不能加总或相互校验 [s1][s2]。\n\n口径提醒：[s1] 整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入；分组 GMV 不可跨组相加，也不能与单维合计做一致性断言；[s2] 整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入；分组 GMV 不可跨组相加，也不能与单维合计做一致性断言",
    "step_sql": [
-    "SELECT p.category, ROUND(SUM(o.pay_amount), 2) AS gmv FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' AND r.region_name = '华东' GROUP BY p.category ORDER BY gmv DESC",
-    "WITH category_sales AS (\n  SELECT p.category, SUM(o.pay_amount) AS gmv\n  FROM orders o\n  JOIN order_items i ON i.order_id = o.order_id\n  JOIN products p ON p.product_id = i.product_id\n  JOIN regions r ON r.region_id = o.region_id\n  WHERE o.status = 'paid' AND r.region_name = '华东'\n  GROUP BY p.category\n  ORDER BY gmv DESC\n  LIMIT 3\n),\nproduct_sales AS (\n  SELECT p.category, p.product_name, SUM(o.pay_amount) AS gmv\n  FROM orders o\n  JOIN order_items i ON i.order_id = o.order_id\n  JOIN products p ON p.product_id = i.product_id\n  JOIN regions r ON r.region_id = o.region_id\n  JOIN category_sales cs ON cs.category = p.category\n  WHERE o.status = 'paid' AND r.region_name = '华东'\n  GROUP BY p.category, p.product_name\n)\nSELECT category, product_name, ROUND(gmv, 2) AS gmv\nFROM product_sales\nORDER BY category, gmv DESC"
+    "SELECT p.category, ROUND(SUM(o.pay_amount), 2) AS gmv\nFROM orders o\nJOIN order_items i ON i.order_id = o.order_id\nJOIN products p ON p.product_id = i.product_id\nJOIN regions r ON r.region_id = o.region_id\nWHERE o.status = 'paid' AND r.region_name = '华东'\nGROUP BY p.category\nORDER BY gmv DESC",
+    "WITH category_sales AS (\n  SELECT p.category, SUM(o.pay_amount) AS gmv\n  FROM orders o\n  JOIN order_items i ON i.order_id = o.order_id\n  JOIN products p ON p.product_id = i.product_id\n  JOIN regions r ON r.region_id = o.region_id\n  WHERE o.status = 'paid' AND r.region_name = '华东'\n  GROUP BY p.category\n  ORDER BY gmv DESC\n  LIMIT 3\n),\nproduct_sales AS (\n  SELECT p.category, p.product_name, SUM(o.pay_amount) AS gmv\n  FROM orders o\n  JOIN order_items i ON i.order_id = o.order_id\n  JOIN products p ON p.product_id = i.product_id\n  JOIN regions r ON r.region_id = o.region_id\n  WHERE o.status = 'paid' AND r.region_name = '华东'\n  GROUP BY p.category, p.product_name\n)\nSELECT ps.category, ps.product_name, ROUND(ps.gmv, 2) AS gmv\nFROM product_sales ps\nJOIN category_sales cs ON cs.category = ps.category\nORDER BY ps.category, ps.gmv DESC"
    ]
   },
   {
@@ -30,13 +33,13 @@
    "skipped": 0,
    "warnings": [],
    "analysis_error": "",
-   "elapsed_ms": 4937,
+   "elapsed_ms": 5184,
    "usage": {
-    "prompt_tokens": 863,
-    "completion_tokens": 303
+    "prompt_tokens": 970,
+    "completion_tokens": 300
    },
    "coverage": 1.0,
-   "answer": "两地区指标口径一致，均按订单状态汇总：华东 GMV 为 692,922.73，退款率为 0.1484 [s1]；华南 GMV 为 776,288.51，退款率为 0.1129 [s2]。从规模看，华南 GMV 高于华东，差额约 83,365.78（由上述两数相减得出）[s1][s2]；从退款率看，华东高于华南，约高 0.0355（同上相减）[s1][s2]。\n\n需要注意，GMV 为整单 pay_amount 口径，上述数值仅用于两地区整体对比，不可按品类、商品或品牌拆分后跨组相加 [s1][s2]。当前结果仅覆盖两地区的汇总指标，未提供订单量、退款订单数等明细，因此无法进一步判断差异来源；若需解释原因，还需补充相应步骤。",
+   "answer": "华东地区 GMV 为 692,922.73，退款率为 0.1484（即 14.84%）[s1]；华南地区 GMV 为 776,288.51，退款率为 0.1129（即 11.29%）[s2]。对比来看，华南 GMV 高于华东，华东退款率高于华南 [s1][s2]。\n\n两地区均按 region_name 过滤、以订单表关联地区表统计，GMV 采用 status='paid' 的 pay_amount 求和，退款率采用 status='refunded' 订单数除以去重订单数，两步骤口径一致 [s1][s2]。局限：两步骤均未显式限定时间范围，无法确认统计区间是否一致；退款率分母为全部订单数而非已支付订单数，该定义差异会影响退款率的可比性解读。",
    "step_sql": [
     "SELECT ROUND(SUM(CASE WHEN o.status = 'paid' THEN o.pay_amount ELSE 0 END), 2) AS gmv, ROUND(SUM(CASE WHEN o.status = 'refunded' THEN 1 ELSE 0 END) * 1.0 / COUNT(DISTINCT o.order_id), 4) AS refund_rate FROM orders o JOIN regions r ON r.region_id = o.region_id WHERE r.region_name = '华东'",
     "SELECT ROUND(SUM(CASE WHEN o.status = 'paid' THEN o.pay_amount ELSE 0 END), 2) AS gmv, ROUND(SUM(CASE WHEN o.status = 'refunded' THEN 1 ELSE 0 END) * 1.0 / COUNT(DISTINCT o.order_id), 4) AS refund_rate FROM orders o JOIN regions r ON r.region_id = o.region_id WHERE r.region_name = '华南'"
@@ -51,13 +54,13 @@
    "skipped": 0,
    "warnings": [],
    "analysis_error": "",
-   "elapsed_ms": 5343,
+   "elapsed_ms": 5383,
    "usage": {
-    "prompt_tokens": 911,
-    "completion_tokens": 369
+    "prompt_tokens": 1005,
+    "completion_tokens": 422
    },
    "coverage": 1.0,
-   "answer": "今年已支付订单的GMV按季度分别为：2026-Q2 为 1,057,067.83，2026-Q3 为 1,565,736.55，2026-Q4 为 739,899.33 [s1]。对应季度的订单数分别为：2026-Q2 211 单、2026-Q3 303 单、2026-Q4 152 单 [s2]。两步骤的季度格式均为 YYYY-QN，且均按季度分组，与子问题一致 [s1][s2]。\n\n需要说明的是，两个步骤的结果中都没有出现 2026-Q1，即今年第一季度在当前结果中缺失，无法给出该季度的GMV和订单数 [s1][s2]。此外，GMV 为整单 pay_amount 口径，仅反映已支付订单的金额汇总 [s1]。\n\n局限：两步骤均只返回了 Q2–Q4 三个季度，Q1 缺失的原因当前结果不足以判断，需补充覆盖 Q1 的查询结果才能确认是确实无数据还是被过滤条件排除 [s1][s2]。",
+   "answer": "今年已产生数据的季度为 2026-Q2、2026-Q3、2026-Q4，2026-Q1 无数据。各季度 GMV 为：2026-Q2 1,057,067.83 [s1]；2026-Q3 1,565,736.55 [s1]；2026-Q4 739,899.33 [s1]。各季度订单数为：2026-Q2 211 单 [s2]；2026-Q3 303 单 [s2]；2026-Q4 152 单 [s2]。\n\n按季度对齐后，2026-Q2 对应 GMV 1,057,067.83、订单数 211；2026-Q3 对应 GMV 1,565,736.55、订单数 303；2026-Q4 对应 GMV 739,899.33、订单数 152 [s1][s2]。2026-Q1 在两个步骤结果中均未出现，按现有结果应说明该季度无数据，未做合并或推算 [s1][s2]。\n\n局限：两步骤均以 status='paid' 且 order_date 不早于今年年初为过滤条件，季度由 order_date 月份换算，口径一致；但 GMV 为整单 pay_amount 口径，结果仅覆盖已支付订单，未包含其他状态订单的情况。",
    "step_sql": [
     "SELECT '2026-Q' || ((CAST(substr(o.order_date, 6, 2) AS INTEGER) - 1) / 3 + 1) AS quarter, ROUND(SUM(o.pay_amount), 2) AS gmv FROM orders o WHERE o.status = 'paid' AND o.order_date >= date('now', 'start of year') GROUP BY quarter ORDER BY quarter",
     "SELECT '2026-Q' || CAST((CAST(substr(o.order_date, 6, 2) AS INTEGER) + 2) / 3 AS TEXT) AS quarter, COUNT(DISTINCT o.order_id) AS order_count FROM orders o WHERE o.status = 'paid' AND o.order_date >= date('now','start of year') GROUP BY quarter ORDER BY quarter"
@@ -72,13 +75,13 @@
    "skipped": 0,
    "warnings": [],
    "analysis_error": "",
-   "elapsed_ms": 3823,
+   "elapsed_ms": 4845,
    "usage": {
-    "prompt_tokens": 788,
-    "completion_tokens": 318
+    "prompt_tokens": 895,
+    "completion_tokens": 260
    },
    "coverage": 1.0,
-   "answer": "华东地区各品类销量分别为：家电 185、数码 176、服饰 194、食品 143 [s1]；华东地区总销量为 698 [s2]。两者口径一致，均为已支付订单（status = 'paid'）且限定华东地区，销量均按 order_items 的 quantity 汇总 [s1][s2]。\n\n据此计算各品类占华东总销量的比例：家电约 26.5%（185/698）、数码约 25.2%（176/698）、服饰约 27.8%（194/698）、食品约 20.5%（143/698），合计约 100%，与规划要求中“占比合计应约为 100%”一致 [s1][s2]。\n\n局限：本次结果仅覆盖销量占比，未涉及 gmv 口径；若后续需要销售额占比，需另行按整单 pay_amount 口径取数，且按品类拆分后不可跨组相加。当前结果不足以判断其他地区或其他状态订单的情况。",
+   "answer": "华东地区各品类销量及占华东总销量（698）的比例为：家电 185，占 26.5%；数码 176，占 25.2%；服饰 194，占 27.8%；食品 143，占 20.5% [s1][s2]。四个品类合计销量 698，与分母一致，占比合计约为 100% [s1][s2]。\n\n结果中仅出现家电、数码、服饰、食品四类，未出现未归类品类，因此按现有结果无需额外说明未归类部分 [s1]。上述占比均以华东地区已支付订单的商品数量合计为分母计算 [s1][s2]。",
    "step_sql": [
     "SELECT p.category, SUM(i.quantity) AS units FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' AND r.region_name = '华东' GROUP BY p.category",
     "SELECT SUM(i.quantity) AS units FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' AND r.region_name = '华东'"
@@ -93,16 +96,16 @@
    "skipped": 0,
    "warnings": [],
    "analysis_error": "",
-   "elapsed_ms": 4115,
+   "elapsed_ms": 5008,
    "usage": {
-    "prompt_tokens": 1130,
-    "completion_tokens": 322
+    "prompt_tokens": 1001,
+    "completion_tokens": 381
    },
-   "coverage": 0.25,
-   "answer": "[s1] 按地区统计了客户总数，结果为华东 28、华北 34、华南 27、西南 31 [s1]。该步 SQL 的分组粒度是地区，与子问题一致，但只统计了客户总数，没有统计下单客户数，因此不能据此计算复购占比。\n\n[s2] 的 SQL 分组粒度是“客户+地区”，输出的是每个复购客户一行、每行计数为 1，而不是按地区汇总的复购客户数，与子问题“按地区统计复购客户数”不一致，因此该步结果不可用，不能引用其中的数字，也不能把 115 行当作复购客户数或用于地区排名。\n\n综上，当前结果不足以判断各地区复购客户数及复购占比：缺少一步按地区分组、对满足下单次数≥2 的客户去重计数的结果；同时 [s1] 也缺少下单客户数。",
+   "coverage": 1.0,
+   "answer": "按地区统计的复购客户数（下过至少两单的客户）为：华东 27 人、华北 32 人、华南 26 人、西南 30 人 [s2]。四个地区均有复购客户，其中华北规模最大，华南最小 [s2]。\n\n结合各地区客户与下单客户分布看：华东客户总数 28、下单客户 28 [s1]，复购客户 27 [s2]；华北客户总数 34、下单客户 33 [s1]，复购客户 32 [s2]；华南客户总数 27、下单客户 27 [s1]，复购客户 26 [s2]；西南客户总数 31、下单客户 31 [s1]，复购客户 30 [s2]。各地区复购客户数与下单客户数差距均为 1 人左右，但客户总数本身存在差异（华北 34 人为最高，华南 27 人为最低）[s1]，因此比较复购规模时需注意基数不同。\n\n局限：本次结果中地区未出现空值，故未涉及空值处理；s1 与 s2 为不同统计口径的独立结果，未做加总或一致性校验，上述对比仅作并列展示。",
    "step_sql": [
-    "SELECT r.region_name, COUNT(DISTINCT c.customer_id) AS customer_count FROM customers c JOIN regions r ON r.region_id = c.region_id GROUP BY r.region_name",
-    "SELECT r.region_name, COUNT(DISTINCT o.customer_id) AS customer_count\nFROM orders o\nJOIN regions r ON r.region_id = o.region_id\nWHERE o.status = 'paid'\nGROUP BY o.customer_id, r.region_name\nHAVING COUNT(DISTINCT o.order_id) >= 2"
+    "SELECT r.region_name, COUNT(DISTINCT c.customer_id) AS customer_count, COUNT(DISTINCT o.customer_id) AS ordered_customer_count FROM customers c JOIN regions r ON r.region_id = c.region_id LEFT JOIN orders o ON o.customer_id = c.customer_id AND o.status = 'paid' GROUP BY r.region_name",
+    "SELECT r.region_name, COUNT(DISTINCT t.customer_id) AS customer_count\nFROM (\n  SELECT o.customer_id, o.region_id\n  FROM orders o\n  WHERE o.status = 'paid'\n  GROUP BY o.customer_id, o.region_id\n  HAVING COUNT(DISTINCT o.order_id) >= 2\n) t\nJOIN regions r ON r.region_id = t.region_id\nGROUP BY r.region_name"
    ]
   },
   {
@@ -112,15 +115,18 @@
    "steps": 3,
    "ok_steps": 3,
    "skipped": 0,
-   "warnings": [],
+   "warnings": [
+    "整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入；分组 GMV 不可跨组相加，也不能与单维合计做一致性断言",
+    "整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入；分组 GMV 不可跨组相加，也不能与单维合计做一致性断言"
+   ],
    "analysis_error": "",
-   "elapsed_ms": 8760,
+   "elapsed_ms": 6414,
    "usage": {
-    "prompt_tokens": 1152,
-    "completion_tokens": 444
+    "prompt_tokens": 1341,
+    "completion_tokens": 459
    },
-   "coverage": 0.125,
-   "answer": "以地区×品类交叉结果为主表，四个地区均覆盖家电、数码、服饰、食品四类，共16个组合 [s3]。其中华北家电最高（645321.48），华东食品最低（320303.33）[s3]；各地区内部品类分布相对均衡，未见某地区单一品类占比明显突出的情况 [s3]。需说明的是，GMV为整单 pay_amount 汇总口径，按品类拆分后不可跨组相加，也不能当作可加分摊销售额或因果证据 [s1][s2][s3]。\n\n地区合计与品类合计可用于校验：地区维度共4行，华北949944.8、西南949944.8、华南776288.51、华东692922.73 [s1]；品类维度共4行，家电2194242.74、数码2047994.47、服饰1991826.0、食品1643766.27 [s2]。但受整单口径限制，交叉表各组数值不能简单加总去对齐地区或品类合计，因此当前结果不足以完成严格的口径校验，缺少按订单明细分摊金额的步骤。\n\n局限：三步SQL均按 status='paid' 过滤，但未对地区或品类为空值的记录做显式处理说明，空值记录是否被排除无法从结果判断 [s1][s2][s3]；同时缺少空值分布统计步骤，无法评估其对合计的影响。",
+   "coverage": 1.0,
+   "answer": "按地区×品类交叉口径，各地区各品类GMV如下：华东家电441996.96、数码403841.94、服饰408817.14、食品320303.33；华北家电645321.48、数码560597.98、服饰541507.1、食品412208.44；华南家电473377.35、数码476792.74、服饰498175.03、食品389263.1；西南家电633546.95、数码606761.81、服饰543326.73、食品521991.4 [s3]。该结果覆盖4个地区×4个品类共16组，无空值地区或品类行出现 [s3]。\n\n单维参考：按地区整体GMV为华东692922.73、华北943547.67、华南776288.51、西南949944.8 [s1]；按品类整体GMV为家电2194242.74、数码2047994.47、服饰1991826.0、食品1643766.27 [s2]。\n\n局限：s2与s3均带口径警告，整单pay_amount关联order_items后按维度汇总会按明细行重复计入，故上述品类及交叉分组GMV不可跨组相加，也不能与s1地区合计做加总一致性校验，只能按标注口径并列展示 [s2][s3]；GMV为累计口径，且s1仅覆盖已支付订单（status='paid'）[s1]。\n\n口径提醒：[s2] 整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入；分组 GMV 不可跨组相加，也不能与单维合计做一致性断言；[s3] 整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入；分组 GMV 不可跨组相加，也不能与单维合计做一致性断言",
    "step_sql": [
     "SELECT r.region_name, ROUND(SUM(o.pay_amount), 2) AS gmv FROM orders o JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' GROUP BY r.region_name",
     "SELECT p.category, ROUND(SUM(o.pay_amount), 2) AS gmv FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id WHERE o.status = 'paid' GROUP BY p.category",
@@ -136,16 +142,16 @@
    "skipped": 0,
    "warnings": [],
    "analysis_error": "",
-   "elapsed_ms": 7326,
+   "elapsed_ms": 5817,
    "usage": {
-    "prompt_tokens": 1053,
-    "completion_tokens": 542
+    "prompt_tokens": 996,
+    "completion_tokens": 626
    },
    "coverage": 1.0,
-   "answer": "两个步骤的 SQL 与子问题基本一致：均按 `substr(order_date,1,7)` 的月份粒度分组，过滤条件为 `status='paid'` 且订单日期不早于当年年初，指标分别为 `SUM(pay_amount)` 的月度 GMV 和基于该 GMV 的 `LAG` 环比增长率，环比保留 4 位小数 [s1][s2]。因此两步结果可用于对齐展示。\n\n按月份对齐后，今年各月 GMV 与环比为：2026-05 GMV 492500.01、环比为空（无前一个月数据）[s1][s2]；2026-06 GMV 564567.82、环比 0.1463 [s1][s2]；2026-07 GMV 610080.51、环比 0.0806 [s1][s2]；2026-08 GMV 510829.29、环比 -0.1627 [s1][s2]；2026-09 GMV 444826.75、环比 -0.1292 [s1][s2]；2026-10 GMV 453340.95、环比 0.0191 [s1][s2]；2026-11 GMV 286558.38、环比 -0.3679 [s1][s2]。1 月无数据，因此“1月环比为空”的处理约定在本结果中未被实际触发。\n\n局限：结果仅覆盖 2026-05 至 2026-11 共 7 个月，缺少今年 1–4 月及 12 月的数据，无法据此判断全年各月情况；GMV 为整单 `pay_amount` 口径，未按品类/商品/品牌拆分，不存在跨组相加问题，但该口径下的月度波动不能作为因果解释 [s1][s2]。",
+   "answer": "今年各月 GMV 仅返回 7 行，分别为：2026-05 为 492500.01、2026-06 为 564567.82、2026-07 为 610080.51、2026-08 为 510829.29、2026-09 为 444826.75、2026-10 为 453340.95、2026-11 为 286558.38 [s1]。今年 1–4 月及 12 月没有出现在结果中，因此这些月份的 GMV 与环比无法给出 [s1]。\n\n去年 12 月 GMV 查询结果为 NULL [s2]，因此今年 1 月的前一个月值不可得，1 月环比无法计算；同时 1 月 GMV 本身也未出现在 [s1] 中。基于现有结果，只能对 2026-06 至 2026-11 中相邻月份均出现的月份计算环比：2026-06 为 (564567.82−492500.01)/492500.01≈0.1463，2026-07 为 (610080.51−564567.82)/564567.82≈0.0806，2026-08 为 (510829.29−610080.51)/610080.51≈−0.1627，2026-09 为 (444826.75−510829.29)/510829.29≈−0.1292，2026-10 为 (453340.95−444826.75)/444826.75≈0.0191，2026-11 为 (286558.38−453340.95)/453340.95≈−0.3679（均由 [s1] 相邻两月数值计算）。2026-05 因缺少 2026-04 的 GMV，环比无法计算 [s1]。\n\n局限：今年 1–4 月及 12 月数据缺失，去年 12 月 GMV 为 NULL [s1][s2]，故原问题要求的“今年每个月”的完整 GMV 与环比序列当前结果不足以判断；上述环比仅覆盖 6 个有相邻两月数据的月份。",
    "step_sql": [
     "SELECT substr(o.order_date, 1, 7) AS month, ROUND(SUM(o.pay_amount), 2) AS gmv FROM orders o WHERE o.status = 'paid' AND o.order_date >= date('now','start of year') GROUP BY substr(o.order_date, 1, 7)",
-    "WITH monthly AS (\n  SELECT substr(o.order_date, 1, 7) AS month,\n         SUM(o.pay_amount) AS gmv\n  FROM orders o\n  WHERE o.status = 'paid'\n    AND o.order_date >= date('now', 'start of year')\n  GROUP BY substr(o.order_date, 1, 7)\n)\nSELECT month,\n       ROUND((gmv - LAG(gmv) OVER (ORDER BY month)) * 1.0 / LAG(gmv) OVER (ORDER BY month), 4) AS mom_growth_rate\nFROM monthly\nORDER BY month"
+    "SELECT ROUND(SUM(o.pay_amount), 2) AS gmv FROM orders o WHERE o.status = 'paid' AND substr(o.order_date, 1, 7) = '2025-12'"
    ]
   },
   {
@@ -155,18 +161,21 @@
    "steps": 2,
    "ok_steps": 2,
    "skipped": 0,
-   "warnings": [],
+   "warnings": [
+    "整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入；分组 GMV 不可跨组相加，也不能与单维合计做一致性断言",
+    "整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入；分组 GMV 不可跨组相加，也不能与单维合计做一致性断言"
+   ],
    "analysis_error": "",
-   "elapsed_ms": 6289,
+   "elapsed_ms": 5746,
    "usage": {
-    "prompt_tokens": 1343,
-    "completion_tokens": 471
+    "prompt_tokens": 1554,
+    "completion_tokens": 337
    },
    "coverage": 1.0,
-   "answer": "[s1] 按品牌和商品分组汇总已支付订单的 pay_amount，分组粒度与“每个品牌下各商品的销售额”一致，可以作为排名基础；[s2] 在同一粒度上按品牌分区、按 gmv 降序取前两名，与“每个品牌销售额前两名商品”一致。按品牌看，代工白牌前两名为冲锋衣 448735.46、速干T恤 430459.38；联名款前两名为空气炸锅 367146.03、速食面 364728.1；自有品牌前两名为机械键盘 458247.68、羽绒服 427867.37 [s2]。三个品牌均至少有两个商品，因此无需触发“不足两个则全部列出”的规则 [s1][s2]。\n\n排名并列处理方面，[s2] 使用 ROW_NUMBER() 按 gmv 降序编号，并列时会按未指定的顺序分配不同名次，因此“并列时排名处理需保持一致”这一要求在当前结果中无法确认是否满足；同时 [s1] 的 24 行明细中未观察到同品牌内 gmv 完全相同的商品，但仅凭展示结果不足以排除并列情况 [s1][s2]。\n\n局限：gmv 为整单 pay_amount 口径，按品牌/商品拆分后不可跨组相加，上述数值只能用于品牌内商品排序，不能当作可加分摊销售额或因果证据 [s1][s2]；此外，[s2] 的并列排名规则未在 SQL 中显式定义，若存在并列，前两名结果可能不稳定 [s2]。",
+   "answer": "按品牌分组，销售额前两名商品如下：代工白牌为冲锋衣 448735.46、速干T恤 430459.38；联名款为空气炸锅 367146.03、速食面 364728.1；自有品牌为机械键盘 458247.68、羽绒服 427867.37 [s2]。上述结果按品牌内销售额降序取前两名，每个品牌各返回两条，未出现并列导致的额外行 [s2]。\n\n需注意，s2 的销售额计算将整单 pay_amount 关联到 order_items 后按品牌-商品汇总，存在按明细行重复计入的口径警告，因此上述数值只能作为品牌内排序依据，不可跨品牌相加，也不能与单维合计做一致性断言 [s2]。s1 虽提供了品牌-商品明细，但其 SQL 采用按订单内数量占比分摊 pay_amount 的方式，与 s2 的整单口径不同，两者数值不可直接比较或互相校验 [s1][s2]。\n\n口径提醒：[s1] 整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入；分组 GMV 不可跨组相加，也不能与单维合计做一致性断言；[s2] 整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入；分组 GMV 不可跨组相加，也不能与单维合计做一致性断言",
    "step_sql": [
-    "SELECT p.brand, p.product_name, ROUND(SUM(o.pay_amount), 2) AS gmv FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id WHERE o.status = 'paid' GROUP BY p.brand, p.product_name",
-    "WITH item_gmv AS (\n  SELECT p.brand, p.product_name, SUM(o.pay_amount) AS gmv\n  FROM orders o\n  JOIN order_items i ON i.order_id = o.order_id\n  JOIN products p ON p.product_id = i.product_id\n  WHERE o.status = 'paid'\n  GROUP BY p.brand, p.product_name\n),\nranked AS (\n  SELECT brand, product_name, gmv,\n         ROW_NUMBER() OVER (PARTITION BY brand ORDER BY gmv DESC) AS rn\n  FROM item_gmv\n)\nSELECT brand, product_name, ROUND(gmv, 2) AS gmv\nFROM ranked\nWHERE rn <= 2\nORDER BY brand, gmv DESC"
+    "SELECT p.brand, p.product_name, ROUND(SUM(i.quantity * (o.pay_amount / NULLIF((SELECT SUM(i2.quantity) FROM order_items i2 WHERE i2.order_id = o.order_id), 0))), 2) AS gmv FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id WHERE o.status = 'paid' GROUP BY p.brand, p.product_name",
+    "WITH product_sales AS (\n  SELECT p.brand, p.product_name, SUM(o.pay_amount) AS gmv\n  FROM orders o\n  JOIN order_items i ON i.order_id = o.order_id\n  JOIN products p ON p.product_id = i.product_id\n  WHERE o.status = 'paid'\n  GROUP BY p.brand, p.product_name\n),\nranked AS (\n  SELECT brand, product_name, gmv,\n         ROW_NUMBER() OVER (PARTITION BY brand ORDER BY gmv DESC) AS rn\n  FROM product_sales\n)\nSELECT brand, product_name, ROUND(gmv, 2) AS gmv\nFROM ranked\nWHERE rn <= 2\nORDER BY brand, gmv DESC"
    ]
   },
   {
@@ -176,15 +185,17 @@
    "steps": 2,
    "ok_steps": 2,
    "skipped": 0,
-   "warnings": [],
+   "warnings": [
+    "整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入；分组 GMV 不可跨组相加，也不能与单维合计做一致性断言"
+   ],
    "analysis_error": "",
-   "elapsed_ms": 4612,
+   "elapsed_ms": 5220,
    "usage": {
-    "prompt_tokens": 802,
-    "completion_tokens": 319
+    "prompt_tokens": 938,
+    "completion_tokens": 289
    },
    "coverage": 1.0,
-   "answer": "两个步骤的 SQL 与子问题基本一致：均按品牌分组、限定已支付订单，并分别统计 GMV 与去重订单数 [s1][s2]。按品牌对齐后，代工白牌 GMV 为 3,653,211.34、订单数 452；联名款 GMV 为 1,822,453.23、订单数 283；自有品牌 GMV 为 2,402,164.91、订单数 334 [s1][s2]。三个品牌在两个结果中均出现，未发现需单独处理的空值品牌行 [s1][s2]。\n\n需注意，GMV 为整单 pay_amount 口径，按品牌拆分后不可跨组相加，也不能视为可加分摊销售额或因果证据；上述品牌 GMV 仅用于组内展示 [s1]。此外，当前结果仅覆盖三个品牌，若存在未归类品牌，结果中未体现，需以完整品牌清单核对后再作全量结论 [s1][s2]。",
+   "answer": "按品牌对齐后，各品牌结果如下：代工白牌 GMV 为 3,653,211.34、订单数 452 [s1][s2]；联名款 GMV 为 1,822,453.23、订单数 283 [s1][s2]；自有品牌 GMV 为 2,402,164.91、订单数 334 [s1][s2]。两个步骤均按品牌分组，订单数使用 COUNT(DISTINCT o.order_id)，与“各品牌订单数”的口径一致 [s2]。\n\n局限：s1 存在口径警告，整单 pay_amount 关联 order_items 后按品牌汇总会按明细行重复计入，因此上述品牌 GMV 只能标注口径后并列展示，不可跨组相加，也不能与单维合计做一致性断言 [s1]；订单数不受该警告影响 [s2]。\n\n口径提醒：[s1] 整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入；分组 GMV 不可跨组相加，也不能与单维合计做一致性断言",
    "step_sql": [
     "SELECT p.brand, ROUND(SUM(o.pay_amount), 2) AS gmv FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id WHERE o.status = 'paid' GROUP BY p.brand",
     "SELECT p.brand, COUNT(DISTINCT o.order_id) AS order_count FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id WHERE o.status = 'paid' GROUP BY p.brand"
@@ -199,13 +210,13 @@
    "skipped": 0,
    "warnings": [],
    "analysis_error": "",
-   "elapsed_ms": 5865,
+   "elapsed_ms": 7815,
    "usage": {
-    "prompt_tokens": 789,
-    "completion_tokens": 510
+    "prompt_tokens": 886,
+    "completion_tokens": 416
    },
    "coverage": 1.0,
-   "answer": "先核对口径：s1 按收货地址所在地区分组、以 status='paid' 过滤，汇总 pay_amount 得到各地区 GMV，与“各地区 GMV”子问题一致，结果可用；s2 以同一 status='paid' 过滤汇总 pay_amount 得到全国总 GMV，与“全国总 GMV”子问题一致，结果可用。两步的 GMV 定义与过滤条件相同，分子分母口径一致 [s1][s2]。\n\n按各地区 GMV 除以全国总 GMV 计算占比：华东 692922.73 / 3362703.71 ≈ 20.61%，华北 943547.67 / 3362703.71 ≈ 28.06%，华南 776288.51 / 3362703.71 ≈ 23.09%，西南 949944.8 / 3362703.71 ≈ 28.25% [s1][s2]。四个地区 GMV 合计为 3362703.71，与全国总 GMV 完全相等，因此上述占比之和为 100%，未出现因地区缺失或未归属地区而略低于 100% 的情况 [s1][s2]。\n\n需注意：s1 结果仅含 4 个地区，占比之和恰为 100% 说明这 4 个地区已覆盖 s2 口径下的全部已支付订单金额，但当前结果未提供地区维度是否存在空值或未匹配地区的直接信息，该点无法进一步验证 [s1][s2]。此外，gmv 为整单 pay_amount 口径，上述占比仅反映各地区整单金额占全国整单金额的比例，不可作为可加分摊销售额或因果证据 [s1][s2]。",
+   "answer": "按收货地址所在地区统计的已支付订单GMV分别为：华东 692922.73、华北 943547.67、华南 776288.51、西南 949944.8 [s1]；全国已支付订单总GMV为 3362703.71 [s2]。两步均按 status = 'paid' 过滤，GMV 均为整单 pay_amount 口径，地区分子与全国分母口径一致。\n\n以 [s2] 为分母计算，各地区占全国比例约为：华东 20.61%、华北 28.06%、华南 23.09%、西南 28.25%（由 [s1] 各地区GMV除以 [s2] 全国总GMV得出）。四个地区占比合计约 100.01%，与 100% 的微小差异来自四舍五入，而非地区缺失。\n\n需注意：结果中仅出现四个地区 [s1]，若实际存在其他地区或未归属地区的已支付订单，其GMV会计入全国总量 [s2] 但不在上述分组中，此时各地区占比之和会略低于100%；当前结果未提供地区清单完整性信息，无法确认是否存在此类订单。此外，按品类/商品/品牌拆分后的GMV不可跨组相加，本结论仅适用于地区维度。",
    "step_sql": [
     "SELECT r.region_name, ROUND(SUM(o.pay_amount), 2) AS gmv FROM orders o JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' GROUP BY r.region_name",
     "SELECT ROUND(SUM(o.pay_amount), 2) AS gmv FROM orders o WHERE o.status = 'paid'"
@@ -218,18 +229,21 @@
    "steps": 3,
    "ok_steps": 3,
    "skipped": 0,
-   "warnings": [],
+   "warnings": [
+    "整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入；分组 GMV 不可跨组相加，也不能与单维合计做一致性断言",
+    "整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入；分组 GMV 不可跨组相加，也不能与单维合计做一致性断言"
+   ],
    "analysis_error": "",
-   "elapsed_ms": 7420,
+   "elapsed_ms": 7061,
    "usage": {
-    "prompt_tokens": 1591,
-    "completion_tokens": 470
+    "prompt_tokens": 1467,
+    "completion_tokens": 558
    },
-   "coverage": 0.125,
-   "answer": "上个月按地区×品类交叉汇总的 GMV 共 16 个组合，覆盖华东、华北、华南、西南 4 个地区与家电、数码、服饰、食品 4 个品类，无缺失组合 [s3]。交叉明细中，华北家电最高（120903.56），华南食品最低（14333.12）[s3]；各地区内部均呈现四品类齐全的分布 [s3]。\n\n需要说明口径限制：s1 按地区汇总、s2 按品类汇总、s3 按地区×品类汇总，三者均使用整单 pay_amount 口径 [s1][s2][s3]。由于订单可含多个品类商品，按品类或地区×品类拆分后的数值不可跨组相加，也不能作为可加分摊销售额；因此 s1、s2 与 s3 之间的加总一致性校验在当前口径下不成立，不能据此判断交叉明细是否完整覆盖地区或品类合计 [s1][s2][s3]。当前结果只能用于描述各交叉组合的整单口径 GMV 分布，不足以判断分摊后的地区或品类销售额 [s3]。",
+   "coverage": 1.0,
+   "answer": "上个月（按 SQL 中“start of month -1 month”至“start of month”的时间范围）地区×品类交叉 GMV 共 16 个组合，逐组为：华东—家电 58383.41、华东—数码 74170.44、华东—服饰 71866.88、华东—食品 49124.75；华北—家电 120903.56、华北—数码 86296.2、华北—服饰 67555.87、华北—食品 68803.95；华南—家电 33838.33、华南—数码 37053.28、华南—服饰 29350.15、华南—食品 14333.12；西南—家电 76692.66、西南—数码 107751.01、西南—服饰 80406.64、西南—食品 62956.51 [s3]。四个地区均覆盖家电、数码、服饰、食品四个品类，结果中未出现缺失组合 [s3]。\n\n地区合计方面，上个月华东 116221.46、华北 149209.45、华南 52577.34、西南 135332.7 [s1]；品类合计方面，家电 289817.96、数码 305270.93、服饰 249179.54、食品 195218.33 [s2]。这些单维结果仅作补充展示，不与交叉结果做加总或一致性断言。\n\n局限：s2 与 s3 均带口径警告，整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入，其分组 GMV 不可跨组相加，也不能与单维合计做一致性断言，相关数值只能按标注口径并列展示 [s2][s3]；s1 为地区单维汇总，未涉及品类拆分 [s1]。\n\n口径提醒：[s2] 整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入；分组 GMV 不可跨组相加，也不能与单维合计做一致性断言；[s3] 整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入；分组 GMV 不可跨组相加，也不能与单维合计做一致性断言",
    "step_sql": [
-    "SELECT r.region_name, ROUND(SUM(o.pay_amount), 2) AS gmv\nFROM orders o\nJOIN regions r ON r.region_id = o.region_id\nWHERE o.status = 'paid'\n  AND o.order_date >= date('now', 'start of month', '-1 month')\n  AND o.order_date < date('now', 'start of month')\nGROUP BY r.region_name",
-    "SELECT p.category, ROUND(SUM(o.pay_amount), 2) AS gmv\nFROM orders o\nJOIN order_items i ON i.order_id = o.order_id\nJOIN products p ON p.product_id = i.product_id\nWHERE o.status = 'paid'\n  AND o.order_date >= date('now','start of month','-1 month')\n  AND o.order_date < date('now','start of month')\nGROUP BY p.category",
+    "SELECT r.region_name, ROUND(SUM(o.pay_amount), 2) AS gmv FROM orders o JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' AND o.order_date >= date('now','start of month','-1 month') AND o.order_date < date('now','start of month') GROUP BY r.region_name",
+    "SELECT p.category, ROUND(SUM(o.pay_amount), 2) AS gmv\nFROM orders o\nJOIN order_items i ON i.order_id = o.order_id\nJOIN products p ON p.product_id = i.product_id\nWHERE o.status = 'paid'\n  AND o.order_date >= date('now', 'start of month', '-1 month')\n  AND o.order_date < date('now', 'start of month')\nGROUP BY p.category",
     "SELECT r.region_name, p.category, ROUND(SUM(o.pay_amount), 2) AS gmv\nFROM orders o\nJOIN regions r ON r.region_id = o.region_id\nJOIN order_items i ON i.order_id = o.order_id\nJOIN products p ON p.product_id = i.product_id\nWHERE o.status = 'paid'\n  AND o.order_date >= date('now','start of month','-1 month')\n  AND o.order_date < date('now','start of month')\nGROUP BY r.region_name, p.category"
    ]
   },
@@ -242,16 +256,16 @@
    "skipped": 0,
    "warnings": [],
    "analysis_error": "",
-   "elapsed_ms": 7110,
+   "elapsed_ms": 7176,
    "usage": {
-    "prompt_tokens": 1938,
-    "completion_tokens": 467
+    "prompt_tokens": 1813,
+    "completion_tokens": 398
    },
-   "coverage": 0.0,
-   "answer": "[s1] 按客户粒度汇总了已支付订单的 GMV，分组粒度与“统计每个客户的 GMV 总额”一致，可用于识别客户是否达到 3 万门槛；但结果只展示了前 50 行、共 119 行，未展示行不能用于汇总或排名 [s1]。\n\n[s2] 的 SQL 分组为地区，但 HAVING 条件是对该地区所有已支付订单的 pay_amount 求和后大于 3 万，而不是先筛选“客户 GMV 超过 3 万”再按地区计数；其 customer_count 统计的是该地区所有已支付客户数，并非满足客户级 GMV 门槛的人数。因此 [s2] 的分组粒度与目标子问题不一致，结果不可用，不能引用其中的 28、33、27、31 等数字 [s2]。\n\n当前结果不足以判断“GMV 超过 3 万的客户按地区统计人数”。缺失的关键一步是：在客户级 GMV 汇总基础上筛选 gmv > 30000 的客户，再按客户所属地区去重计数，并明确地区空值的处理方式；现有 [s1] 被截断且不含地区字段，[s2] 口径不符，均无法支撑该结论 [s1][s2]。",
+   "coverage": 1.0,
+   "answer": "按地区统计，GMV超过3万元的客户人数为：华东8人、华北16人、华南12人、西南16人 [s2]。筛选条件为订单状态为已支付（paid）且客户GMV合计超过30000元 [s2]。\n\n需要说明的是，[s2]的统计口径是按“客户+地区”分组后再按地区汇总，即同一客户若在不同地区均有订单且各组合计超过3万元，会在多个地区各计一次，因此各地区人数不能简单相加为客户总数；同时[s2]仅返回4个地区，结果中未出现地区字段缺失或为空的客户分组，无法据此判断这类客户是否被排除或归入其他类别 [s2]。\n\n[s1]按客户名称汇总GMV，与[s2]按客户+地区汇总的口径不同，且[s1]结果被截断（仅展示前50行，共119行），不能用于核对或补充[s2]的地区人数 [s1]。",
    "step_sql": [
-    "SELECT c.customer_id, c.customer_name, ROUND(SUM(o.pay_amount), 2) AS gmv FROM orders o JOIN customers c ON c.customer_id = o.customer_id WHERE o.status = 'paid' GROUP BY c.customer_id, c.customer_name",
-    "SELECT r.region_name, COUNT(DISTINCT o.customer_id) AS customer_count FROM orders o JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' GROUP BY r.region_name HAVING SUM(o.pay_amount) > 30000"
+    "SELECT c.customer_name, ROUND(SUM(o.pay_amount), 2) AS gmv FROM orders o JOIN customers c ON c.customer_id = o.customer_id WHERE o.status = 'paid' GROUP BY c.customer_name",
+    "SELECT r.region_name, COUNT(DISTINCT t.customer_id) AS customer_count\nFROM (\n  SELECT o.customer_id, o.region_id\n  FROM orders o\n  WHERE o.status = 'paid'\n  GROUP BY o.customer_id, o.region_id\n  HAVING SUM(o.pay_amount) > 30000\n) t\nJOIN regions r ON r.region_id = t.region_id\nGROUP BY r.region_name"
    ]
   }
  ],
@@ -263,18 +277,21 @@
    "steps": 2,
    "ok_steps": 2,
    "skipped": 0,
-   "warnings": [],
+   "warnings": [
+    "整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入；分组 GMV 不可跨组相加，也不能与单维合计做一致性断言",
+    "整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入；分组 GMV 不可跨组相加，也不能与单维合计做一致性断言"
+   ],
    "analysis_error": "",
-   "elapsed_ms": 15915,
+   "elapsed_ms": 10136,
    "usage": {
-    "prompt_tokens": 1155,
-    "completion_tokens": 2366
+    "prompt_tokens": 1319,
+    "completion_tokens": 1201
    },
    "coverage": 1.0,
-   "answer": "s1 按品类分组、筛选华东已支付订单并按销售额降序取前三，与子问题一致；华东销售额前三品类为家电 441996.96[s1]、服饰 408817.14[s1]、数码 403841.94[s1]，名次按该结果顺序保留。\n\n从 s2 的全品类商品前二结果中，仅保留属于上述前三品类的商品，并按 s1 的品类顺序展示：家电为吹风机 92248.47[s2] 第一、空气炸锅 89617.72[s2] 第二；服饰为冲锋衣 90164.02[s2] 第一、速干T恤 87130.19[s2] 第二；数码为机械键盘 109791.43[s2] 第一、路由器 78257.84[s2] 第二。s2 中食品类商品不属于 s1 前三品类，未纳入最终列表[s1][s2]。\n\n局限：s1、s2 的 gmv 均为整单 pay_amount 汇总口径，按品类/商品拆分后不可跨组相加，不能当作可加分摊销售额或因果证据[s1][s2]。",
+   "answer": "华东地区销售额最高的三个品类为家电、服饰、数码，对应 gmv 分别为 441996.96、408817.14、403841.94 [s1]。这三个品类下销售额前两名的商品分别是：家电为吹风机 92248.47、空气炸锅 89617.72；服饰为冲锋衣 90164.02、速干T恤 87130.19；数码为机械键盘 109791.43、路由器 78257.84 [s2]。s2 中另有食品品类结果，但不属于 s1 选出的三个头部品类，故不纳入本次回答 [s1][s2]。\n\n局限：s1 与 s2 均存在“整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入”的口径警告，因此上述分组 gmv 只能按该口径并列展示，不能跨组相加，也不能与单维合计做一致性断言 [s1][s2]。\n\n口径提醒：[s1] 整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入；分组 GMV 不可跨组相加，也不能与单维合计做一致性断言；[s2] 整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入；分组 GMV 不可跨组相加，也不能与单维合计做一致性断言",
    "step_sql": [
-    "SELECT p.category, ROUND(SUM(o.pay_amount), 2) AS gmv FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' AND r.region_name = '华东' GROUP BY p.category ORDER BY gmv DESC LIMIT 3",
-    "WITH item_gmv AS (\n  SELECT p.category, p.product_name, SUM(o.pay_amount) AS gmv\n  FROM orders o\n  JOIN order_items i ON i.order_id = o.order_id\n  JOIN products p ON p.product_id = i.product_id\n  JOIN regions r ON r.region_id = o.region_id\n  WHERE o.status = 'paid' AND r.region_name = '华东'\n  GROUP BY p.category, p.product_name\n),\nranked AS (\n  SELECT category, product_name, gmv,\n         ROW_NUMBER() OVER (PARTITION BY category ORDER BY gmv DESC) AS rn\n  FROM item_gmv\n)\nSELECT category, product_name, ROUND(gmv, 2) AS gmv\nFROM ranked\nWHERE rn <= 2\nORDER BY category, gmv DESC"
+    "SELECT p.category, ROUND(SUM(o.pay_amount), 2) AS gmv\nFROM orders o\nJOIN order_items i ON i.order_id = o.order_id\nJOIN products p ON p.product_id = i.product_id\nJOIN regions r ON r.region_id = o.region_id\nWHERE o.status = 'paid' AND r.region_name = '华东'\nGROUP BY p.category\nORDER BY gmv DESC\nLIMIT 3",
+    "WITH product_sales AS (\n  SELECT p.category, p.product_name, SUM(o.pay_amount) AS gmv\n  FROM orders o\n  JOIN order_items i ON i.order_id = o.order_id\n  JOIN products p ON p.product_id = i.product_id\n  JOIN regions r ON r.region_id = o.region_id\n  WHERE o.status = 'paid' AND r.region_name = '华东'\n  GROUP BY p.category, p.product_name\n),\nranked AS (\n  SELECT category, product_name, gmv,\n         ROW_NUMBER() OVER (PARTITION BY category ORDER BY gmv DESC) AS rn\n  FROM product_sales\n)\nSELECT category, product_name, ROUND(gmv, 2) AS gmv\nFROM ranked\nWHERE rn <= 2\nORDER BY category, gmv DESC"
    ]
   },
   {
@@ -286,13 +303,13 @@
    "skipped": 0,
    "warnings": [],
    "analysis_error": "",
-   "elapsed_ms": 13926,
+   "elapsed_ms": 15895,
    "usage": {
-    "prompt_tokens": 921,
-    "completion_tokens": 1807
+    "prompt_tokens": 1030,
+    "completion_tokens": 1412
    },
    "coverage": 1.0,
-   "answer": "[s1]和[s2]的 SQL 均按 `region_name` 分别筛选华东、华南，指标为 `paid` 状态订单的 `pay_amount` 汇总 GMV，以及 `refunded` 订单数除以去重订单数的退款率，分组粒度与各自子问题一致，结果可用。华东 GMV 为 692922.73、退款率为 0.1484 [s1]；华南 GMV 为 776288.51、退款率为 0.1129 [s2]。\n\n在当前查询口径下，华南 GMV 高于华东，差额为 83365.78（计算自 [s1][s2]）；华南退款率低于华东，低 0.0355，即约 3.55 个百分点（计算自 [s1][s2]）。因此按这两个指标看，华南规模更高且退款率更低 [s1][s2]。\n\n局限：两步 SQL 均未包含时间范围过滤，时间范围未限定，严格按原始要求“对齐时间范围”时当前结果不足以完成该口径下的最终对比，缺少带统一时间条件的步骤；同时退款率口径为 `refunded` 订单数占去重订单数比例，并非退款金额占 GMV 比例 [s1][s2]。",
+   "answer": "华东地区：GMV 为 692,922.73，退款率为 0.1484（即 14.84%）[s1]。华南地区：GMV 为 776,288.51，退款率为 0.1129（即 11.29%）[s2]。两步骤均按 `region_name` 过滤区域，区域划分口径一致 [s1][s2]。\n\n对比来看，华南 GMV 高于华东，差额为 83,365.78 [s1][s2]；退款率则是华东高于华南，高出 0.0355（即 3.55 个百分点）[s1][s2]。\n\n局限：两步 SQL 均未显式限定统计时间范围，因此无法从结果确认两地统计时间范围是否一致或完整；退款率分子为 `status='refunded'` 的订单行计数、分母为去重订单数，若订单表不是一单一行，该退款率口径需注意 [s1][s2]。",
    "step_sql": [
     "SELECT ROUND(SUM(CASE WHEN o.status = 'paid' THEN o.pay_amount ELSE 0 END), 2) AS gmv, ROUND(SUM(CASE WHEN o.status = 'refunded' THEN 1 ELSE 0 END) * 1.0 / COUNT(DISTINCT o.order_id), 4) AS refund_rate FROM orders o JOIN regions r ON r.region_id = o.region_id WHERE r.region_name = '华东'",
     "SELECT ROUND(SUM(CASE WHEN o.status = 'paid' THEN o.pay_amount ELSE 0 END), 2) AS gmv, ROUND(SUM(CASE WHEN o.status = 'refunded' THEN 1 ELSE 0 END) * 1.0 / COUNT(DISTINCT o.order_id), 4) AS refund_rate FROM orders o JOIN regions r ON r.region_id = o.region_id WHERE r.region_name = '华南'"
@@ -307,16 +324,16 @@
    "skipped": 0,
    "warnings": [],
    "analysis_error": "",
-   "elapsed_ms": 9962,
+   "elapsed_ms": 12278,
    "usage": {
-    "prompt_tokens": 1000,
-    "completion_tokens": 1307
+    "prompt_tokens": 1101,
+    "completion_tokens": 1208
    },
    "coverage": 1.0,
-   "answer": "按今年已支付订单口径，GMV 按季度为：2026-Q2 为 1,057,067.83 [s1]，2026-Q3 为 1,565,736.55 [s1]，2026-Q4 为 739,899.33 [s1]；与之对应的订单数为：Q2 为 211 单 [s2]，Q3 为 303 单 [s2]，Q4 为 152 单 [s2]。两个步骤的结果都只包含 Q2、Q3、Q4 三行；今年 Q1 在已支付记录中没有出现的数值，结果中也没有按零值补行 [s1][s2]，因此 Q1 只能表述为“无符合条件的数据”，不能视为 0。\n\n需要说明的对齐限制：s1 的季度字段已按 YYYY-QN 输出，与问题要求一致 [s1]；s2 的季度标签只有 Qn（Q2/Q3/Q4），缺少年份前缀 [s2]，虽然两个步骤的过滤条件都限定为今年且按季度聚合，但在严格按 YYYY-QN 展示和对齐时，s2 的标签不符合格式要求，引用其数值时须注意这一点。此外，两个步骤都只过滤了 status='paid' 且 order_date 不早于今年年初 [s1][s2]；除上述 Q1 缺失外，没有其他季度遗漏的证据。",
+   "answer": "今年各季度合并后的结果为：2026-Q2 GMV 1,057,067.83、订单数 211 [s1][s2]；2026-Q3 GMV 1,565,736.55、订单数 303 [s1][s2]；2026-Q4 GMV 739,899.33、订单数 152 [s1][s2]。\n\n2026-Q1 在两个步骤结果中均未出现，因此该季度的 GMV 与订单数两项指标都没有数据 [s1][s2]，属于两个指标同时缺失，而不是只有一项指标缺失。\n\n局限：两个步骤都只统计今年且 status='paid' 的订单，GMV 采用整单 pay_amount 口径 [s1][s2]；Q1 没有任何行，无法区分该季度是零已支付订单还是数据未覆盖，当前结果不足以判断这一点 [s1][s2]。",
    "step_sql": [
-    "SELECT substr(o.order_date, 1, 4) || '-Q' || ((CAST(substr(o.order_date, 6, 2) AS INTEGER) - 1) / 3 + 1) AS quarter, ROUND(SUM(o.pay_amount), 2) AS gmv FROM orders o WHERE o.status = 'paid' AND o.order_date >= date('now', 'start of year') GROUP BY quarter ORDER BY quarter",
-    "SELECT 'Q' || CAST((CAST(substr(o.order_date, 6, 2) AS INTEGER) + 2) / 3 AS TEXT) AS quarter, COUNT(DISTINCT o.order_id) AS order_count FROM orders o WHERE o.status = 'paid' AND o.order_date >= date('now','start of year') GROUP BY quarter ORDER BY quarter"
+    "SELECT (substr(o.order_date, 1, 4) || '-Q' || CAST((CAST(substr(o.order_date, 6, 2) AS INTEGER) + 2) / 3 AS TEXT)) AS quarter, ROUND(SUM(o.pay_amount), 2) AS gmv FROM orders o WHERE o.status = 'paid' AND o.order_date >= date('now', 'start of year') GROUP BY quarter ORDER BY quarter",
+    "SELECT (substr(o.order_date, 1, 4) || '-Q' || CAST((CAST(substr(o.order_date, 6, 2) AS INTEGER) + 2) / 3 AS TEXT)) AS quarter, COUNT(DISTINCT o.order_id) AS order_count FROM orders o WHERE o.status = 'paid' AND o.order_date >= date('now', 'start of year') GROUP BY quarter ORDER BY quarter"
    ]
   },
   {
@@ -328,60 +345,60 @@
    "skipped": 0,
    "warnings": [],
    "analysis_error": "",
-   "elapsed_ms": 9451,
+   "elapsed_ms": 12033,
    "usage": {
-    "prompt_tokens": 865,
-    "completion_tokens": 1223
+    "prompt_tokens": 953,
+    "completion_tokens": 1436
    },
    "coverage": 1.0,
-   "answer": "两条查询的 SQL 与子问题一致：均限定 `status = 'paid'` 且 `region_name = '华东'`，销量口径均为 `SUM(i.quantity)`；[s1] 按品类分组，[s2] 汇总华东总销量，可直接用于占比计算 [s1][s2]。华东总销量为 698 [s2]；分品类销量为家电 185、数码 176、服饰 194、食品 143 [s1]，四者合计 698，与总销量一致 [s1][s2]。\n\n据此计算，各品类销量占华东总销量比例为：家电 26.50%、数码 25.21%、服饰 27.79%、食品 20.49% [s1][s2]。\n\n当前结果中总销量 698 非零 [s2]，且四个品类均有销量 [s1]；就这些结果而言，未出现总销量为零或品类为空导致无法计算的情况。",
+   "answer": "华东地区总销量为 698 [s1]。各品类销量占比如下：家电销量 185 [s2]，占华东总销量 26.50%（185/698）[s1][s2]；数码销量 176 [s2]，占 25.21%（176/698）[s1][s2]；服饰销量 194 [s2]，占 27.79%（194/698）[s1][s2]；食品销量 143 [s2]，占 20.49%（143/698）[s1][s2]。\n\ns1 与 s2 均按订单状态 paid、地区名称“华东”、销量 quantity 统计，地区和销量口径一致 [s1][s2]；但两步 SQL 均未限定时间范围，因此上述占比对应的是未指定时间范围下的结果 [s1][s2]。结果中未出现空品类行 [s2]，总销量不为 0 [s1]。",
    "step_sql": [
-    "SELECT p.category, SUM(i.quantity) AS units FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' AND r.region_name = '华东' GROUP BY p.category",
-    "SELECT SUM(i.quantity) AS units FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' AND r.region_name = '华东'"
+    "SELECT SUM(i.quantity) AS units FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' AND r.region_name = '华东'",
+    "SELECT p.category, SUM(i.quantity) AS units\nFROM orders o\nJOIN order_items i ON i.order_id = o.order_id\nJOIN products p ON p.product_id = i.product_id\nJOIN regions r ON r.region_id = o.region_id\nWHERE o.status = 'paid' AND r.region_name = '华东'\nGROUP BY p.category"
    ]
   },
   {
    "id": 5,
    "category": "repurchase",
    "question": "各地区的复购客户数（下过至少两单的客户）",
-   "steps": 3,
-   "ok_steps": 1,
-   "skipped": 2,
+   "steps": 2,
+   "ok_steps": 2,
+   "skipped": 0,
    "warnings": [],
    "analysis_error": "",
-   "elapsed_ms": 15085,
+   "elapsed_ms": 19594,
    "usage": {
-    "prompt_tokens": 1581,
-    "completion_tokens": 1525
+    "prompt_tokens": 1559,
+    "completion_tokens": 2275
    },
-   "coverage": 0.0,
-   "answer": "当前结果不足以判断“各地区的复购客户数”。[s1] 的 SQL 按 `customer_id, region_name` 分组，返回的是客户-地区粒度结果，而子问题要求的是按地区汇总的复购客户数；分组粒度与问题不一致，因此 [s1] 结果不可用，不能引用其中数字作为各地区复购客户数，且该结果还被截断 [s1]。\n\n作为规模背景的客户总数和订单总数当前也缺失：[s2] 按地区统计客户总数未执行，[s3] 按地区统计订单总数未执行 [s2][s3]。因此目前既不能给出可信的地区复购客户数，也不能结合客户总数、订单总数说明地区规模背景。\n\n局限：需要先按地区正确聚合“下过至少两单的客户数”，并补齐按地区的客户总数、订单总数后，才能形成主结果与背景说明；[s1] 因分组粒度错误且截断不可用，[s2][s3] 均未执行 [s1][s2][s3]。",
+   "coverage": 1.0,
+   "answer": "按地区统计的复购客户数（按客户去重）为：华东 27、华北 32、华南 26、西南 30 [s2]。该结果来自按地区分组并对 customer_id 做 COUNT(DISTINCT) 的统计 [s2]。\n\n局限：s1 是按地区-客户的下单频次明细，但结果仅展示前 50/119 行且被截断，未展示行不能用于汇总，因此未用 s1 计算复购客户数 [s1]；s2 的 SQL 未显式展示“订单数至少两单”的过滤条件，复购客户口径依赖 repurchase_customers 表定义，当前结果不足以独立验证该表是否仅包含至少两单客户 [s2]；s2 通过 JOIN regions 统计，结果未出现空地区或未归属地区行，无法判断被 JOIN 排除的客户情况 [s2]。",
    "step_sql": [
-    "SELECT r.region_name, COUNT(DISTINCT o.customer_id) AS customer_count\nFROM orders o\nJOIN regions r ON r.region_id = o.region_id\nWHERE o.status = 'paid'\nGROUP BY o.customer_id, r.region_name\nHAVING COUNT(DISTINCT o.order_id) >= 2",
-    "",
-    ""
+    "SELECT r.region_name, c.customer_name, COUNT(DISTINCT o.order_id) AS order_count FROM orders o JOIN customers c ON c.customer_id = o.customer_id JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' GROUP BY r.region_name, c.customer_name",
+    "SELECT r.region_name, COUNT(DISTINCT rc.customer_id) AS customer_count FROM repurchase_customers rc JOIN regions r ON r.region_id = rc.region_id GROUP BY r.region_name"
    ]
   },
   {
    "id": 6,
    "category": "multi_dim",
    "question": "各地区各品类的GMV",
-   "steps": 3,
-   "ok_steps": 3,
+   "steps": 2,
+   "ok_steps": 2,
    "skipped": 0,
-   "warnings": [],
+   "warnings": [
+    "整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入；分组 GMV 不可跨组相加，也不能与单维合计做一致性断言"
+   ],
    "analysis_error": "",
-   "elapsed_ms": 24163,
+   "elapsed_ms": 43798,
    "usage": {
-    "prompt_tokens": 1220,
-    "completion_tokens": 3680
+    "prompt_tokens": 1226,
+    "completion_tokens": 4628
    },
-   "coverage": 0.4375,
-   "answer": "核对口径：s2 按地区分组、仅取 paid、汇总 pay_amount，与“地区 GMV 汇总”一致，可直接引用 [s2]；s1 按“地区+品类”分组，粒度与问题一致，但金额仍是整单 pay_amount，经 order_items 关联到品类后存在按商品行重复计入整单金额的口径风险，因此组合值不可跨品类相加，也不能当作可加分摊销售额 [s1]；s3 按品类分组，但同样使用整单 pay_amount，存在同类口径警告，不能把其数值作为无保留的可加分品类 GMV [s3]。\n\n从 s1 看，结果覆盖 16 个地区×品类组合 [s1]。展示值中相对较高的是华北家电 645321.48、西南家电 633546.95、西南数码 606761.81 [s1]；华东四个品类组合分别为家电 441996.96、数码 403841.94、服饰 408817.14、食品 320303.33 [s1]，但这些是组合行显示值，不能相加后与地区汇总对照。地区汇总为华东 692922.73、华北 943547.67、华南 776288.51、西南 949944.8 [s2]；地区汇总与 s1 的组合明细不是同一汇总层级，不能重复加总 [s1][s2]。s3 的品类显示值为家电 2194242.74、数码 2047994.47、服饰 1991826.0、食品 1643766.27 [s3]，但受上述整单金额按品类拆分口径警告影响，只能作为带警告参考 [s3]。\n\n局限：s1 与 s3 均存在整单 pay_amount 按品类/商品拆分后的口径警告，不能跨组相加，也不能作为可加分摊销售额或因果证据 [s1][s3]；当前结果不足以判断真实可加的品类 GMV，缺少按订单-品类唯一化或分摊后的品类 GMV 查询步骤。",
+   "coverage": 1.0,
+   "answer": "s1 的 SQL 按 region_name、category 分组，过滤 paid 订单，指标为 SUM(pay_amount)，与“各地区各品类 GMV”的分组粒度一致；但该步带口径警告，以下仅按该口径展示，不能跨组相加 [s1]。华东：家电 441996.96 [s1]、数码 403841.94 [s1]、服饰 408817.14 [s1]、食品 320303.33 [s1]；华北：家电 645321.48 [s1]、数码 560597.98 [s1]、服饰 541507.1 [s1]、食品 412208.44 [s1]；华南：家电 473377.35 [s1]、数码 476792.74 [s1]、服饰 498175.03 [s1]、食品 389263.1 [s1]；西南：家电 633546.95 [s1]、数码 606761.81 [s1]、服饰 543326.73 [s1]、食品 521991.4 [s1]。\n\ns1 共返回 16 行，结果为 4 个地区各 4 个品类 [s1]。缺失处理上，未出现的地区/品类组合没有结果行，当前结果不足以判断其是零 GMV 还是数据缺失，因此不补零、不推断；缺少的是未出现组合的覆盖清单 [s1]。\n\n局限：s1 存在“整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入”的口径警告，分组 GMV 不可跨组相加，也不能与单维合计做一致性断言 [s1]；s2 是地区合计校验步骤，不改变主展示口径，但受上述警告限制，不能据此形成一致性结论 [s2]；gmv 为整单 pay_amount 口径，按品类拆分后不可当作可加分摊销售额或因果证据 [s1]。没有失败或跳过的步骤。\n\n口径提醒：[s1] 整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入；分组 GMV 不可跨组相加，也不能与单维合计做一致性断言",
    "step_sql": [
-    "SELECT r.region_name, p.category, ROUND(SUM(o.pay_amount), 2) AS gmv FROM orders o JOIN regions r ON r.region_id = o.region_id JOIN order_items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id WHERE o.status = 'paid' GROUP BY r.region_name, p.category",
-    "SELECT r.region_name, ROUND(SUM(o.pay_amount), 2) AS gmv FROM orders o JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' GROUP BY r.region_name",
-    "SELECT p.category, ROUND(SUM(o.pay_amount), 2) AS gmv FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id WHERE o.status = 'paid' GROUP BY p.category"
+    "SELECT r.region_name, p.category, ROUND(SUM(o.pay_amount), 2) AS gmv\nFROM orders o\nJOIN regions r ON r.region_id = o.region_id\nJOIN order_items i ON i.order_id = o.order_id\nJOIN products p ON p.product_id = i.product_id\nWHERE o.status = 'paid'\nGROUP BY r.region_name, p.category",
+    "SELECT r.region_name, ROUND(SUM(o.pay_amount), 2) AS gmv FROM orders o JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' GROUP BY r.region_name"
    ]
   },
   {
@@ -393,16 +410,16 @@
    "skipped": 0,
    "warnings": [],
    "analysis_error": "",
-   "elapsed_ms": 18896,
+   "elapsed_ms": 16211,
    "usage": {
-    "prompt_tokens": 1156,
-    "completion_tokens": 1656
+    "prompt_tokens": 1249,
+    "completion_tokens": 2311
    },
    "coverage": 0.6154,
-   "answer": "今年各自然月 GMV（整单 pay_amount 口径）[s1]：2026-05 为 492500.01，2026-06 为 564567.82，2026-07 为 610080.51，2026-08 为 510829.29，2026-09 为 444826.75，2026-10 为 453340.95，2026-11 为 286558.38；其中 2026-08 至 2026-09 连续回落，2026-11 为区间内最低 [s1]。\n\n环比方面，[s2] 的子问题要求的是“（当月-前一个月）/前一个月、保留4位小数”的变化率，但其 SQL 只计算了 `gmv - LAG(gmv)` 的绝对差额，返回的 mom_change 列（如 2026-06 为 72067.81、2026-08 为 -99251.22）是金额差而非比率 [s2]，分组粒度虽为自然月，但指标口径与问题不一致，因此该步结果不能作为环比率引用；[s2] 中仅 gmv 列与 [s1] 一致，可相互印证，环比率本身目前没有可用结果。\n\n局限：一是缺少 2026-01 至 2026-04 的记录 [s1][s2]，按“不遗漏今年已发生但可能无订单的月份”的要求，当前结果既无法确认这些月份是无订单还是数据缺失，也无法对 1 月标注“环比不可计算”；二是 [s2] 返回的是绝对差额而非四位小数的环比率，若要给出问题所要求的环比，还需要一个按自然月计算 `(当月GMV-前月GMV)/前月GMV` 并保留四位小数的步骤结果 [s2]。",
+   "answer": "今年各月已支付订单的 GMV 分别为：2026-05 为 492500.01，2026-06 为 564567.82，2026-07 为 610080.51，2026-08 为 510829.29，2026-09 为 444826.75，2026-10 为 453340.95，2026-11 为 286558.38 [s1]。结果中今年仅有上述 7 个月的数据 [s1]。\n\n按月环比方面，2026-05 作为首月没有前一个月，环比为空 [s2]。其余月份中，[s2] 给出的是“当月 GMV 减前月 GMV”的绝对差额：2026-06 为 72067.81，2026-07 为 45512.69，2026-08 为 -99251.22，2026-09 为 -66002.54，2026-10 为 8514.2，2026-11 为 -166782.57 [s2]；但原问题要求的是（当月−前月）/前月并保留 4 位小数的环比比率，而该步实际计算的是差额，指标口径与问题不一致，因此该步的环比结果不可用，不能据此给出所要求的环比数值 [s2]。\n\n局限：当前结果不足以判断题目要求的保留 4 位小数的环比，缺少按“（当月−前月）/前月”计算的步骤 [s2]；并且现有月份仅覆盖 2026-05 至 2026-11，其他月份无数据 [s1]。",
    "step_sql": [
     "SELECT substr(o.order_date, 1, 7) AS month, ROUND(SUM(o.pay_amount), 2) AS gmv FROM orders o WHERE o.status = 'paid' AND o.order_date >= date('now','start of year') GROUP BY substr(o.order_date, 1, 7) ORDER BY month",
-    "WITH monthly AS (\n  SELECT substr(o.order_date, 1, 7) AS month,\n         SUM(o.pay_amount) AS gmv\n  FROM orders o\n  WHERE o.status = 'paid'\n    AND o.order_date >= date('now', 'start of year')\n  GROUP BY substr(o.order_date, 1, 7)\n)\nSELECT month,\n       ROUND(gmv, 2) AS gmv,\n       ROUND(gmv - LAG(gmv) OVER (ORDER BY month), 2) AS mom_change\nFROM monthly\nORDER BY month"
+    "WITH monthly AS (\n  SELECT substr(o.order_date, 1, 7) AS month, SUM(o.pay_amount) AS gmv\n  FROM orders o\n  WHERE o.status = 'paid' AND o.order_date >= date('now', 'start of year')\n  GROUP BY substr(o.order_date, 1, 7)\n)\nSELECT month, ROUND(gmv, 2) AS gmv, ROUND(gmv - LAG(gmv) OVER (ORDER BY month), 2) AS mom_change\nFROM monthly\nORDER BY month"
    ]
   },
   {
@@ -412,17 +429,20 @@
    "steps": 2,
    "ok_steps": 2,
    "skipped": 0,
-   "warnings": [],
+   "warnings": [
+    "整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入；分组 GMV 不可跨组相加，也不能与单维合计做一致性断言",
+    "整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入；分组 GMV 不可跨组相加，也不能与单维合计做一致性断言"
+   ],
    "analysis_error": "",
-   "elapsed_ms": 17392,
+   "elapsed_ms": 27635,
    "usage": {
-    "prompt_tokens": 1395,
-    "completion_tokens": 2431
+    "prompt_tokens": 1606,
+    "completion_tokens": 4217
    },
    "coverage": 1.0,
-   "answer": "核对结果：s1 按 brand、product_name 汇总已支付订单的 pay_amount，与“各品牌下每个商品销售额”一致，可作为明细 [s1]；s2 在同一品牌-商品粒度上按品牌分区、按 gmv 降序取前两名，与“每个品牌销售额前两名商品”一致 [s2]。s2 返回每个品牌 2 个商品：代工白牌为冲锋衣 448735.46、速干T恤 430459.38；联名款为空气炸锅 367146.03、速食面 364728.1；自有品牌为机械键盘 458247.68、羽绒服 427867.37 [s2]。每个品牌最多保留两个商品的要求满足，品牌内按销售额降序 [s2]；但品牌之间 SQL 使用 ORDER BY brand, gmv DESC，不是按品牌总销售额降序，因此“按品牌销售额降序呈现”未体现 [s2]。\n\n并列处理方面，s2 仅使用 ROW_NUMBER() OVER (PARTITION BY brand ORDER BY gmv DESC)，未指定并列时的二级排序或并列取舍规则；若同品牌商品 gmv 相同，前两名归属不能由该 SQL 确定 [s2]。从 s1 列出的 24 行看，同品牌内未出现相同 gmv，本次返回名单未触发并列，但规则缺失仍需记录 [s1][s2]。\n\n局限：gmv 是整单 pay_amount 口径，按品牌/商品拆分后不可跨组相加，不能当作可加分摊销售额或因果证据 [s1][s2]；s1、s2 均成功返回，无失败或跳过步骤。",
+   "answer": "按 s2 的排名结果，在其 gmv 口径（带重复计入警告）下，每个品牌前两名商品为：代工白牌—冲锋衣 448735.46、速干T恤 430459.38；联名款—空气炸锅 367146.03、速食面 364728.1；自有品牌—机械键盘 458247.68、羽绒服 427867.37 [s2]。\n\ns1 给出 24 行品牌-商品明细，分组粒度与子问题一致，但其 gmv 为按订单总数量分摊后的值，并有整单 pay_amount 关联明细行后重复计入的口径警告 [s1]；s2 的 gmv 也有同类口径警告，且两步指标口径不同，不能做加总、差额或一致性断言，只能并列看待 [s1][s2]。\n\n局限：s2 使用 ROW_NUMBER 未处理并列，当前结果未显示并列；结果仅覆盖出现的三个品牌，当前结果不足以判断是否存在无商品销售品牌或商品数不足两名的品牌，缺少品牌全量清单；上述分组 gmv 不可跨组相加，也不能作为无保留销售额或因果证据 [s1][s2]。\n\n口径提醒：[s1] 整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入；分组 GMV 不可跨组相加，也不能与单维合计做一致性断言；[s2] 整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入；分组 GMV 不可跨组相加，也不能与单维合计做一致性断言",
    "step_sql": [
-    "SELECT p.brand, p.product_name, ROUND(SUM(o.pay_amount), 2) AS gmv FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id WHERE o.status = 'paid' GROUP BY p.brand, p.product_name",
+    "SELECT p.brand, p.product_name, ROUND(SUM(i.quantity * o.pay_amount / NULLIF((SELECT SUM(i2.quantity) FROM order_items i2 WHERE i2.order_id = o.order_id), 0)), 2) AS gmv FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id WHERE o.status = 'paid' GROUP BY p.brand, p.product_name",
     "WITH product_sales AS (\n  SELECT p.brand, p.product_name, SUM(o.pay_amount) AS gmv\n  FROM orders o\n  JOIN order_items i ON i.order_id = o.order_id\n  JOIN products p ON p.product_id = i.product_id\n  WHERE o.status = 'paid'\n  GROUP BY p.brand, p.product_name\n),\nranked AS (\n  SELECT brand, product_name, gmv,\n         ROW_NUMBER() OVER (PARTITION BY brand ORDER BY gmv DESC) AS rn\n  FROM product_sales\n)\nSELECT brand, product_name, ROUND(gmv, 2) AS gmv\nFROM ranked\nWHERE rn <= 2\nORDER BY brand, gmv DESC"
    ]
   },
@@ -433,15 +453,17 @@
    "steps": 2,
    "ok_steps": 2,
    "skipped": 0,
-   "warnings": [],
+   "warnings": [
+    "整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入；分组 GMV 不可跨组相加，也不能与单维合计做一致性断言"
+   ],
    "analysis_error": "",
-   "elapsed_ms": 11856,
+   "elapsed_ms": 10848,
    "usage": {
-    "prompt_tokens": 878,
-    "completion_tokens": 1390
+    "prompt_tokens": 998,
+    "completion_tokens": 1387
    },
-   "coverage": 0.5,
-   "answer": "[s1] 的 SQL 虽按品牌分组，但把订单级 `pay_amount` 与 `order_items` 连接后求和；当一笔订单包含多个商品或多个品牌时，整单金额会在品牌维度被重复计入，指标口径与“各品牌GMV”不一致，因此 [s1] 的 GMV 结果不可用，不能引用其中数值。当前结果不足以判断各品牌GMV，缺少一个订单级去重或明确品牌归属/分摊规则的 GMV 步骤。\n\n[s2] 按品牌统计 `COUNT(DISTINCT order_id)`，与“各品牌订单数”子问题一致，可使用：代工白牌 452 单、联名款 283 单、自有品牌 334 单 [s2]。该口径是在每个品牌内对订单去重；同一订单若包含多个品牌，会在多个品牌下分别计数，因此这些品牌订单数不可相加 [s2]。\n\n局限：GMV 步骤 [s1] 因整单金额在商品行上重复求和而不可用；同时 GMV 是整单 `pay_amount` 口径，按品牌拆分后不可跨组相加，不能当作可加分摊销售额。订单数仅有 [s2] 的品牌内去重结果，跨品牌订单不能合并为不重复总订单数。",
+   "coverage": 1.0,
+   "answer": "按品牌对齐后，各品牌结果如下：代工白牌 GMV 为 3,653,211.34 [s1]，订单数为 452 [s2]；联名款 GMV 为 1,822,453.23 [s1]，订单数为 283 [s2]；自有品牌 GMV 为 2,402,164.91 [s1]，订单数为 334 [s2]。两步结果均返回 3 个品牌，品牌名称一致，未出现空值或缺失品牌，因此按品牌合并时无需额外填充 [s1][s2]。\n\n需要说明的是，[s1] 的 GMV 存在口径警告：整单 pay_amount 关联 order_items 后按品牌汇总会按明细行重复计入，分组 GMV 不可跨组相加，也不能与单维合计做一致性断言 [s1]。因此上述 GMV 只能按品牌并列参考；订单数按 COUNT(DISTINCT order_id) 统计 [s2]。\n\n口径提醒：[s1] 整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入；分组 GMV 不可跨组相加，也不能与单维合计做一致性断言",
    "step_sql": [
     "SELECT p.brand, ROUND(SUM(o.pay_amount), 2) AS gmv FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id WHERE o.status = 'paid' GROUP BY p.brand",
     "SELECT p.brand, COUNT(DISTINCT o.order_id) AS order_count FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id WHERE o.status = 'paid' GROUP BY p.brand"
@@ -451,21 +473,22 @@
    "id": 11,
    "category": "ratio",
    "question": "各地区GMV占全国比例",
-   "steps": 2,
+   "steps": 3,
    "ok_steps": 2,
-   "skipped": 0,
+   "skipped": 1,
    "warnings": [],
    "analysis_error": "",
-   "elapsed_ms": 11925,
+   "elapsed_ms": 17265,
    "usage": {
-    "prompt_tokens": 809,
-    "completion_tokens": 1913
+    "prompt_tokens": 980,
+    "completion_tokens": 2524
    },
    "coverage": 1.0,
-   "answer": "核对口径：s1 按 region_name 分组并过滤 status='paid'，与“各地区 GMV”子问题一致；s2 过滤 status='paid' 汇总全国，与“全国总 GMV”子问题一致。s1 中四个地区的 GMV 合计为 3,362,703.71 [s1]，与 s2 的全国总 GMV 3,362,703.71 [s2] 一致，说明本次结果中地区分子合计与全国分母能够勾稽，未发现因遗漏或重复导致的总量差异。\n\n按“地区 GMV ÷ 全国总 GMV”计算：华东 GMV 为 692,922.73，占全国 20.61%；华北 GMV 为 943,547.67，占 28.06%；华南 GMV 为 776,288.51，占 23.09%；西南 GMV 为 949,944.8，占 28.25% [s1][s2]。以上 GMV 均为 status='paid' 的 pay_amount 汇总口径 [s1][s2]。",
+   "answer": "以全国GMV 3362703.71为基准[s2]，各地区GMV及占比如下：华东GMV 692922.73、占比20.61%（[s1]/[s2]）；华北GMV 943547.67、占比28.06%（[s1]/[s2]）；华南GMV 776288.51、占比23.09%（[s1]/[s2]）；西南GMV 949944.8、占比28.25%（[s1]/[s2]）。\n\n局限：地区字段覆盖情况与空值分布未核对，因为[s3]未执行；[s1]按regions关联后分组，地区缺失或异常的订单未单独说明，当前仅能列出返回的4个地区占比，无法判断地区归属是否存在遗漏或异常[s1][s2][s3]。",
    "step_sql": [
     "SELECT r.region_name, ROUND(SUM(o.pay_amount), 2) AS gmv FROM orders o JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' GROUP BY r.region_name",
-    "SELECT ROUND(SUM(o.pay_amount), 2) AS gmv FROM orders o WHERE o.status = 'paid'"
+    "SELECT ROUND(SUM(o.pay_amount), 2) AS gmv FROM orders o WHERE o.status = 'paid'",
+    ""
    ]
   },
   {
@@ -475,19 +498,22 @@
    "steps": 3,
    "ok_steps": 3,
    "skipped": 0,
-   "warnings": [],
+   "warnings": [
+    "整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入；分组 GMV 不可跨组相加，也不能与单维合计做一致性断言",
+    "整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入；分组 GMV 不可跨组相加，也不能与单维合计做一致性断言"
+   ],
    "analysis_error": "",
-   "elapsed_ms": 37673,
+   "elapsed_ms": 26169,
    "usage": {
-    "prompt_tokens": 1342,
-    "completion_tokens": 4503
+    "prompt_tokens": 1509,
+    "completion_tokens": 4384
    },
-   "coverage": 0.0,
-   "answer": "“上个月”按三个 SQL 的时间过滤均为上月自然月 [s1][s2][s3]。订单级地区合计可用 s2：华东 116,221.46、华北 149,209.45、华南 52,577.34、西南 135,332.70 [s2]。但 s1 的地区×品类明细不能直接作为可加总主表：按 s1 行相加，华东 253,545.48、华北 343,559.58、华南 114,574.88、西南 327,806.82，均显著高于 s2 对应地区合计 [s1][s2]；s1 全部明细合计 1,039,486.76，与 s3 品类行合计相同，而 s2 地区合计总和为 453,340.95 [s1][s2][s3]。这表明 s1/s3 的金额口径与 s2 不一致，不能把 s1 的品类行跨组相加或用于计算占比。\n\ns1 的分组粒度为地区×品类、过滤为已支付和上月自然月，与子问题一致；但 s1/s3 均连接了 order_items 而金额仍取订单级 pay_amount，存在订单金额未去重/未分摊的口径问题，故 s1 的明细值和 s3 的品类合计只能视为未去重查询结果，不能作为无保留的 GMV 结论 [s1][s3]。局限：gmv 为整单 pay_amount 口径，按品类拆分后不可跨组相加；当前缺按订单去重或按明细行分摊后的地区×品类汇总步骤，因此当前结果不足以判断可靠的各地区各品类 GMV 及占比。",
+   "coverage": 1.0,
+   "answer": "s1 按地区、s2 按品类、s3 按地区×品类分组，过滤均为已支付且同一“上个月”时间窗口 [s1][s2][s3]，指标均为整单 pay_amount 求和；分组粒度与各子问题一致，但 s2、s3 带口径警告。上个月地区×品类 GMV 交叉结果为：华东家电 58383.41 [s3]、华东数码 74170.44 [s3]、华东服饰 71866.88 [s3]、华东食品 49124.75 [s3]；华北家电 120903.56 [s3]、华北数码 86296.2 [s3]、华北服饰 67555.87 [s3]、华北食品 68803.95 [s3]；华南家电 33838.33 [s3]、华南数码 37053.28 [s3]、华南服饰 29350.15 [s3]、华南食品 14333.12 [s3]；西南家电 76692.66 [s3]、西南数码 107751.01 [s3]、西南服饰 80406.64 [s3]、西南食品 62956.51 [s3]。\n\n作为辅助并列展示，s1 地区汇总为华东 116221.46 [s1]、华北 149209.45 [s1]、华南 52577.34 [s1]、西南 135332.7 [s1]；s2 品类汇总为家电 289817.96 [s2]、数码 305270.93 [s2]、服饰 249179.54 [s2]、食品 195218.33 [s2]，其中 s2 带口径警告。局限：s2 和 s3 均提示整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入，分组 GMV 不可跨组相加，也不能与单维合计做一致性断言 [s2][s3]；因此上述 s2、s3 数值只能按该口径并列展示，不能当作无保留结论。\n\n口径提醒：[s2] 整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入；分组 GMV 不可跨组相加，也不能与单维合计做一致性断言；[s3] 整单 pay_amount 关联 order_items 后按维度汇总会按明细行重复计入；分组 GMV 不可跨组相加，也不能与单维合计做一致性断言",
    "step_sql": [
-    "SELECT r.region_name, p.category, ROUND(SUM(o.pay_amount), 2) AS gmv FROM orders o JOIN regions r ON r.region_id = o.region_id JOIN order_items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id WHERE o.status = 'paid' AND o.order_date >= date('now','start of month','-1 month') AND o.order_date < date('now','start of month') GROUP BY r.region_name, p.category",
     "SELECT r.region_name, ROUND(SUM(o.pay_amount), 2) AS gmv FROM orders o JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' AND o.order_date >= date('now','start of month','-1 month') AND o.order_date < date('now','start of month') GROUP BY r.region_name",
-    "SELECT p.category, ROUND(SUM(o.pay_amount), 2) AS gmv FROM orders o JOIN order_items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id WHERE o.status = 'paid' AND o.order_date >= date('now','start of month','-1 month') AND o.order_date < date('now','start of month') GROUP BY p.category"
+    "SELECT p.category, ROUND(SUM(o.pay_amount), 2) AS gmv\nFROM orders o\nJOIN order_items i ON i.order_id = o.order_id\nJOIN products p ON p.product_id = i.product_id\nWHERE o.status = 'paid'\n  AND o.order_date >= date('now','start of month','-1 month')\n  AND o.order_date < date('now','start of month')\nGROUP BY p.category",
+    "SELECT r.region_name, p.category, ROUND(SUM(o.pay_amount), 2) AS gmv\nFROM orders o\nJOIN regions r ON r.region_id = o.region_id\nJOIN order_items i ON i.order_id = o.order_id\nJOIN products p ON p.product_id = i.product_id\nWHERE o.status = 'paid'\n  AND o.order_date >= date('now','start of month','-1 month')\n  AND o.order_date < date('now','start of month')\nGROUP BY r.region_name, p.category"
    ]
   },
   {
@@ -499,16 +525,16 @@
    "skipped": 0,
    "warnings": [],
    "analysis_error": "",
-   "elapsed_ms": 15985,
+   "elapsed_ms": 19070,
    "usage": {
-    "prompt_tokens": 1865,
-    "completion_tokens": 1892
+    "prompt_tokens": 1764,
+    "completion_tokens": 2497
    },
    "coverage": 0.0,
-   "answer": "经核对，s1 的 SQL 按客户和地区汇总已支付订单的 pay_amount，客户级粒度与“查询每个客户GMV及地区”一致；但结果仅展示前 50 行、共 119 行且已截断，未展示行不能用于完整汇总，因此 s1 只能作为部分客户级明细，不能单独给出完整的超过 3 万元客户名单或地区人数 [s1]。\n\ns2 的 SQL 与“按地区统计 GMV 超过 3 万元的客户人数”不一致：它先按地区汇总 pay_amount，并用地区总 pay_amount 超过 30000 作为 HAVING 条件，再统计该地区付费客户数，而不是先筛选客户级 GMV 超过 30000、再按地区计数 [s2]。因此 s2 的地区人数结果不可用，不能引用其数字作为最终统计结果 [s2]。\n\n结论：当前结果不足以判断按地区统计的 GMV 超过 3 万元客户人数。局限包括 s1 结果被截断，不能用于完整汇总 [s1]；s2 因分组粒度和过滤条件与子问题不一致而不可用 [s2]；缺少一个按客户汇总 GMV、筛选客户级 GMV 超过 30000、再按地区计数客户的正确步骤。",
+   "answer": "当前结果不足以给出“GMV超过3万元的客户按地区统计人数”的完整答案。用于最终统计的 [s2] 虽然输出了 4 行地区人数，但其 SQL 先按 customer_id、region_id 分组，再对每个“客户-地区”组合累计 pay_amount 并筛选 >30000，分组粒度和过滤口径与“按客户总 GMV 超过 3 万、同一客户只计一次”不一致，因此该步结果不可用，不能引用其中的地区人数 [s2]。\n\n[s1] 的 SQL 按客户汇总 pay_amount 并筛选 >30000，符合客户明细核对目的 [s1]；但结果共 52 行、仅展示前 50 行，未展示行不能用于汇总或排名，所以也无法据 [s1] 完整汇总出各地区人数 [s1]。当前缺少一个未截断、按客户总 GMV>30000 筛选后以客户去重并按地区计数的步骤。\n\n局限：地区为空或未知时如何处理，[s1]、[s2] 均未明确展示；[s2] 口径与问题不一致，[s1] 明细被截断，均不能作为最终地区人数结论 [s1][s2]。",
    "step_sql": [
-    "SELECT c.customer_id, c.customer_name, r.region_name, ROUND(SUM(o.pay_amount), 2) AS gmv FROM orders o JOIN customers c ON c.customer_id = o.customer_id JOIN regions r ON r.region_id = c.region_id WHERE o.status = 'paid' GROUP BY c.customer_id, c.customer_name, r.region_name",
-    "SELECT r.region_name, COUNT(DISTINCT o.customer_id) AS customer_count FROM orders o JOIN regions r ON r.region_id = o.region_id WHERE o.status = 'paid' GROUP BY r.region_name HAVING SUM(o.pay_amount) > 30000"
+    "SELECT c.customer_name, r.region_name, ROUND(SUM(o.pay_amount), 2) AS gmv\nFROM orders o\nJOIN customers c ON c.customer_id = o.customer_id\nJOIN regions r ON r.region_id = c.region_id\nWHERE o.status = 'paid'\nGROUP BY c.customer_id, c.customer_name, r.region_name\nHAVING SUM(o.pay_amount) > 30000",
+    "SELECT r.region_name, COUNT(DISTINCT t.customer_id) AS customer_count\nFROM (\n  SELECT o.customer_id, o.region_id\n  FROM orders o\n  WHERE o.status = 'paid'\n  GROUP BY o.customer_id, o.region_id\n  HAVING SUM(o.pay_amount) > 30000\n) t\nJOIN regions r ON r.region_id = t.region_id\nGROUP BY r.region_name"
    ]
   }
  ]

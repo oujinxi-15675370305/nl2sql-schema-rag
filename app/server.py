@@ -74,8 +74,8 @@ def _step_payload(step) -> dict:
 def _plan_payload(plan: SQLPlan, question: str) -> dict:
     """`/api/ask` 和 `/api/demo/repair` 共用一份响应结构，前端只写一套渲染。
 
-    快路径（mode=single）字段完全不变；只有分析模式或规划失败回退时才追加
-    mode/steps/answer/evidence，避免页面和旧调用方被新字段影响。
+    快路径的 SQL/结果字段不变；Step 3 的 `answer/conclusion` 默认空/false（见 AC-8.1），
+    只有分析模式或规划失败回退时才追加 mode/steps/evidence，避免页面和旧调用方被新字段影响。
     """
     ctx, keywords = plan.context, plan.keywords
     payload = {
@@ -223,7 +223,11 @@ class Handler(BaseHTTPRequestHandler):
         if mode not in ("single", "analysis"):
             return self._send(*_json(
                 {"ok": False, "error": f"未知 mode：{payload.get('mode')!r}（可选 single / analysis）"}, 400))
-        conclusion = bool(payload.get("conclusion", False))
+        raw_conclusion = payload.get("conclusion", False)
+        if not isinstance(raw_conclusion, bool):
+            return self._send(*_json(
+                {"ok": False, "error": "conclusion 必须是布尔值"}, 400))
+        conclusion = raw_conclusion
 
         # M3：前端没带 session_id 就新开一个，带回来就接着上文
         session = SESSIONS.get(str(payload.get("session_id") or "").strip() or None)

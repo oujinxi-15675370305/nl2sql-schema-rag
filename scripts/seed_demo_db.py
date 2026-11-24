@@ -1,4 +1,4 @@
-"""生成演示用的 SQLite 数据库（4 张表 + 课程无关的模拟数据）。
+"""生成演示用的 SQLite 数据库（6 张表 + 课程无关的模拟数据）。
 
 用法：python scripts/seed_demo_db.py
 """
@@ -65,8 +65,14 @@ def build() -> None:
             unit_price REAL NOT NULL,
             item_amount REAL NOT NULL
         );
+        CREATE TABLE repurchase_customers (
+            customer_id TEXT PRIMARY KEY,
+            region_id INTEGER NOT NULL REFERENCES regions(region_id),
+            order_count INTEGER NOT NULL
+        );
         CREATE INDEX idx_orders_date ON orders(order_date);
         CREATE INDEX idx_orders_region ON orders(region_id);
+        CREATE INDEX idx_repurchase_region ON repurchase_customers(region_id);
         """
     )
 
@@ -110,10 +116,22 @@ def build() -> None:
 
     cur.executemany("INSERT INTO orders VALUES (?, ?, ?, ?, ?, ?, ?, ?)", orders)
     cur.executemany("INSERT INTO order_items VALUES (?, ?, ?, ?, ?)", items)
+    # 复购客户用客户所属地区（不是订单地区），避免跨地区客户被重复归区
+    cur.execute(
+        """
+        INSERT INTO repurchase_customers(customer_id, region_id, order_count)
+        SELECT o.customer_id, c.region_id, COUNT(DISTINCT o.order_id)
+        FROM orders o JOIN customers c ON c.customer_id = o.customer_id
+        WHERE o.status = 'paid'
+        GROUP BY o.customer_id, c.region_id
+        HAVING COUNT(DISTINCT o.order_id) >= 2
+        """
+    )
     conn.commit()
 
     counts = {t: cur.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
-              for t in ("regions", "customers", "products", "orders", "order_items")}
+              for t in ("regions", "customers", "products", "orders", "order_items",
+                        "repurchase_customers")}
     conn.close()
     print(f"已生成 {DB}")
     for k, v in counts.items():

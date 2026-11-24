@@ -69,6 +69,10 @@ def build_context(
     """`keywords` 传了就用它（M3 里是继承后的槽位），避免再抽一遍。"""
     slots = keywords if keywords is not None else extract_keywords(question, catalog)
     metrics, tables, columns = retriever.retrieve(question)
+    # 复购表只服务复购问题；否则“有多少客户”会被它挤进上下文，模型可能直接数全量客户
+    if not re.search(r"复购|回头客", question):
+        tables = [h for h in tables if h.key != "repurchase_customers"]
+        columns = [h for h in columns if h.payload.get("table") != "repurchase_customers"]
     required = _required_tables(catalog, slots)
     held = {h.key for h in tables}
     for name in required:
@@ -95,13 +99,19 @@ def build_context(
 FILTER_COLUMNS = {"region": "region_name", "category": "category"}
 
 
-def _shape_feedback(sql: str, slots: dict) -> str:
+def _shape_feedback(sql: str, slots: dict, question: str = "") -> str:
     """生成后的语义形状检查：筛选条件必须保留；只换筛选时不要 SELECT 筛选列。
 
     这不是替代 `validate`，而是把 prompt 里已经写明的约定变成可执行的反馈：
     返回非空时按一次 validate 失败处理，把话术作为 feedback 让模型重写。
-    只对 `filter` 槽位生效（region/category），无筛选的问题不受影响。
+    只对 `filter` 槽位和“每个分组内 Top-N”生效；无筛选/普通排名的问题不受影响。
     """
+    low = sql.lower()
+    if re.search(r"(?:每个|各|按).{0,20}(?:前|top)\s*[0-9一二三四五六七八九十两](?!\s*个?\s*月)", question, re.I) \
+            and not re.search(r"\b(?:row_number|rank|dense_rank)\s*\(", low):
+        return ("问题要求每个分组内的 Top-N，当前 SQL 只有全局排序/LIMIT；"
+                "请用 WITH + ROW_NUMBER() OVER (PARTITION BY 分组列 ORDER BY 指标 DESC) "
+                "筛 rn <= N 后再输出。")
     filters = slots.get("filter", [])
     if not filters:
         return ""
@@ -114,7 +124,6 @@ def _shape_feedback(sql: str, slots: dict) -> str:
         return ""
     if slots.get("dimension"):
         return ""
-    low = sql.lower()
     # 只看最后一个 SELECT 的投影，避免把 CTE 内部的选择误当成最终输出
     select_part = re.split(r"\bfrom\b", low.rsplit("select", 1)[-1], maxsplit=1)[0]
     for item in filters:
@@ -159,6 +168,12 @@ def llm_sql(
         "  排名指标必须与问题一致：销售额/GMV 用 SUM(o.pay_amount)，"
         "不要用 item_amount、quantity 或 quantity*unit_price 代替。\n"
         "- 问题明确指定了输出格式时严格照做；季度用 YYYY-Qn（如 2026-Q1），不要只输出月份数字。\n"
+        "- 客户排名/明细只输出客户名和指标；除非问题明确要客户编号，不要额外 SELECT customer_id。\n"
+        "- 复购/阈值客户统计（如“下过至少两单的客户数”或“GMV超过某值的客户按地区统计人数”）："
+        "先在子查询按 customer_id 聚合 + HAVING（订单数 >= 2 或 SUM(pay_amount) > 阈值），"
+        "再在外层按地区 COUNT(DISTINCT customer_id)；不要按 customer_id + 地区分组返回客户明细，"
+        "也不要把 HAVING 套在地区汇总上。复购客户也可以直接查 repurchase_customers"
+        "（customer_id, region_id, order_count），用客户所属地区，不要按订单地区拆客户。\n"
         "- 如果问题只问「有哪些 / 列出」某个维度、没有指标：用 SELECT DISTINCT 只选该维度列，"
         "不要臆造指标，也不要 GROUP BY。\n"
         "- 有指标的问题必须 SELECT 指标列（可以再带分组维度），不要只返回维度取值。\n"
@@ -378,6 +393,9 @@ def ask(
     """
     if mode not in ("single", "analysis"):
         raise ValueError(f"未知模式：{mode!r}（可选 single / analysis）")
+    if mode == "analysis":
+        # 分析模式已有综合结论；API 同时传 conclusion=true 也不叠加
+        conclusion = False
     started = time.time()
     full_catalog = catalog or load_catalog()
     hidden = permissions.hidden_columns(full_catalog, role)  # 未知角色在这里抛 ValueError
@@ -470,7 +488,7 @@ def ask(
         ok, message = validate(raw_sql, catalog, denied=hidden, masked=masked_names)  # AC-1.4 / AC-4.1 / AC-4.3
         if ok:
             # 语义形状检查：筛选条件丢了 / 只换筛选却多选了筛选列 → 当 validate 失败，带话术重写
-            shape_error = _shape_feedback(raw_sql, keywords)
+            shape_error = _shape_feedback(raw_sql, keywords, question)
             if shape_error:
                 ok, message = False, shape_error
         timed_out = False
@@ -521,7 +539,10 @@ def ask(
             plan.conclusion_error = "没有结果可总结"
         else:
             from app.conclusion import summarize  # 局部导入，保持 agent 的依赖关系简单
-            answer, error, usage = summarize(question, plan.columns, plan.rows)
+            # 多轮里原始问句可能是“那上个月呢”；用改写后的自包含问句，结论才不会丢上下文
+            answer, error, usage = summarize(
+                plan.rewritten_question or question, plan.columns, plan.rows
+            )
             plan.answer = answer
             plan.conclusion = True
             plan.conclusion_error = error

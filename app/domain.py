@@ -43,6 +43,11 @@ class Metric:
     sql: str
     synonyms: tuple[str, ...] = ()
     requires: tuple[str, ...] = ()
+    # 语义层：指标是否可跨维度相加、基础粒度、使用时的口径警告。
+    # 这些字段只影响 prompt/解释，不改变 SQL 执行。
+    additive: bool = True
+    grain: str = ""
+    warning: str = ""
 
     def text(self) -> str:
         parts = [self.name, self.comment, *self.synonyms]
@@ -136,7 +141,13 @@ class SchemaContext:
         for h in self.metrics:
             metric = catalog.metric(h.key)
             if metric:
-                lines.append(f"-- 指标 {metric.name}: {metric.comment} => {metric.sql}")
+                additivity = "可加" if metric.additive else "不可加"
+                grain = f"，{metric.grain} 粒度" if metric.grain else ""
+                line = (f"-- 指标 {metric.name}（{additivity}{grain}）: "
+                        f"{metric.comment} => {metric.sql}")
+                if metric.warning:
+                    line += f"；注意：{metric.warning}"
+                lines.append(line)
         return "\n".join(lines).strip()
 
 
@@ -159,6 +170,11 @@ class AnalysisStep:
     intent: str = ""
     engine: str = ""
     elapsed_ms: int = 0
+    # Planner 契约：由 Planner 声明的指标/维度/粒度/输出列；只用于执行提示与校验。
+    metric: str = ""
+    dimensions: list[str] = field(default_factory=list)
+    grain: str = ""
+    output_columns: list[str] = field(default_factory=list)
 
 
 @dataclass

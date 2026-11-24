@@ -126,13 +126,31 @@ function clearTags() {
   });
 }
 
+const COLUMN_LABELS = {
+  quarter: "季度",
+  month: "月份",
+  gmv: "销售额",
+  order_count: "订单数",
+  refund_rate: "退款率",
+  customer_count: "客户数",
+  region_name: "地区",
+  customer_name: "客户名",
+  brand: "品牌",
+  category: "品类",
+  mom: "环比",
+};
+
+function columnLabel(name) {
+  return COLUMN_LABELS[String(name).toLowerCase()] || name;
+}
+
 function tableHtml(columns, rows) {
   if (!rows || !rows.length) return `<div class="empty">没有数据</div>`;
   const numeric = columns.map((_, index) =>
     rows.every((row) => row[index] === null || typeof row[index] === "number")
   );
   const head = `<thead><tr>${columns
-    .map((c, index) => `<th${numeric[index] ? ' class="num"' : ""}>${escapeHtml(c)}</th>`)
+    .map((c, index) => `<th${numeric[index] ? ' class="num"' : ""}>${escapeHtml(columnLabel(c))}</th>`)
     .join("")}</tr></thead>`;
   const body = rows
     .map((r) => {
