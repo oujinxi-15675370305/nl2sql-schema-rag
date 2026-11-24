@@ -4,7 +4,8 @@
 
 - **Planner** 只看改写后的问句，不看 schema/SQL，拆 2–4 个自包含子问题，只输出 JSON；
 - **Executor** 每步复用 `agent.ask(mode="single")`，同 role、不共享 session，校验/权限/只读/
-  超时全部沿用；最多 4 步，步间检查总预算；
+  超时全部沿用；最多 4 步，步间检查总预算；执行约束（份额口径）走 `ask(hint=...)` 的
+  独立 prompt 通道，不拼进子问题文本；
 - **Synthesizer** 只看步骤结果（列/行预览 + 失败），不给 schema，不允许写 SQL；结论必须
   引用 `[sN]`，失败步骤由代码强制补进"局限"，避免模型把失败藏掉。
 
@@ -21,6 +22,11 @@ import urllib.request
 from dataclasses import dataclass, field
 
 from app.domain import AnalysisResult, AnalysisStep
+from app.semantics import (
+    DEFAULT_SHARE_INSTRUCTION,
+    is_repurchase_question,
+    is_share_question,
+)
 
 MAX_STEPS = 4
 MIN_STEPS = 2
@@ -128,6 +134,24 @@ def _step_repair() -> int:
     return min(max(value, 0), 2)
 
 
+def _replan_reserve() -> float:
+    """重规划要预留的时间：一次模型调用（Planner 或综合）的超时预算。
+
+    剩余预算不足它时不重规划。故障通常是校验/执行错误，第一轮很快返回；
+    如果第一轮已经烧掉大半预算，再规划只会把综合阶段挤掉，用户从"有结论但带局限"
+    退化成"没有结论"。
+    """
+    return _model_timeout()
+
+
+def _can_replan(elapsed_s: float, budget_s: float) -> bool:
+    """剩余预算够不够再规划一轮：至少还能付一次模型调用（Planner 最坏情况）。
+
+    不够就别开工——重规划挤掉的是综合阶段，用户拿到的是"没有结论"而不是"带局限的结论"。
+    """
+    return budget_s - elapsed_s >= _replan_reserve()
+
+
 def _allows_temperature(model: str) -> bool:
     """reasoning 模型（deepseek-flash / v4-pro / deepseek-reasoner / QwQ 等）不强行传 temperature。"""
     low = model.lower()
@@ -204,6 +228,7 @@ def _clean_steps(data: dict) -> tuple[list[dict], str, str]:
     if not isinstance(raw, list) or not raw:
         return [], "", "规划结果没有 subquestions"
     cleaned: list[dict] = []
+    kept_ids: list[str] = []  # 只记真正保留下来的步骤：依赖被丢弃的 id 不能映射成 sN
     for item in raw:
         if not isinstance(item, dict):
             continue
@@ -214,23 +239,16 @@ def _clean_steps(data: dict) -> tuple[list[dict], str, str]:
             "question": question,
             "purpose": str(item.get("purpose") or "").strip(),
             "depends_on": item.get("depends_on") if isinstance(item.get("depends_on"), list) else [],
-            "metric": str(item.get("metric") or "").strip(),
-            "dimensions": [str(d).strip() for d in item.get("dimensions", [])
-                           if isinstance(d, str) and str(d).strip()]
-            if isinstance(item.get("dimensions"), list) else [],
-            "grain": str(item.get("grain") or "").strip(),
-            "output_columns": [str(c).strip() for c in item.get("output_columns", [])
-                               if isinstance(c, str) and str(c).strip()]
-            if isinstance(item.get("output_columns"), list) else [],
         })
+        kept_ids.append(str(item.get("id") or ""))
     if len(cleaned) < MIN_STEPS:
         return [], "", f"规划只给出 {len(cleaned)} 步，至少需要 {MIN_STEPS} 步"
     warning = ""
     if len(cleaned) > MAX_STEPS:
         warning = f"规划返回 {len(cleaned)} 步，已按上限截断为 {MAX_STEPS} 步"
         cleaned = cleaned[:MAX_STEPS]
-    old_ids = [str(item.get("id") or "") for item in data.get("subquestions", []) if isinstance(item, dict)]
-    id_map = {old: f"s{i + 1}" for i, old in enumerate(old_ids) if old}
+        kept_ids = kept_ids[:MAX_STEPS]
+    id_map = {old: f"s{i + 1}" for i, old in enumerate(kept_ids) if old}
     for index, step in enumerate(cleaned, start=1):
         step["id"] = f"s{index}"
         step["depends_on"] = [id_map[d] for d in step["depends_on"]
@@ -238,12 +256,16 @@ def _clean_steps(data: dict) -> tuple[list[dict], str, str]:
     return cleaned, warning, ""
 
 
-def plan(question: str, *, chat_fn=None, model: str | None = None) -> PlannerOutput:
-    """Planner：只看问句；坏 JSON/步数不合法重试 1 次。"""
+def plan(question: str, *, chat_fn=None, model: str | None = None,
+         feedback: str = "") -> PlannerOutput:
+    """Planner：只看问句；坏 JSON/步数不合法重试 1 次；失败重规划时带上一轮反馈。"""
     chat = chat_fn or _chat
+    user = f"问题：{question}\n只输出 JSON。"
+    if feedback:
+        user += f"\n上一轮执行反馈：{feedback}\n请据此重新规划，不要重复失败的拆法。"
     messages = [
         {"role": "system", "content": PLANNER_SYSTEM},
-        {"role": "user", "content": f"问题：{question}\n只输出 JSON。"},
+        {"role": "user", "content": user},
     ]
     usage: dict[str, int] = {}
     error = "规划失败"
@@ -298,9 +320,6 @@ def _sql_warning(sql: str) -> str:
     return "；".join(warnings)
 
 
-_REPURCHASE_HINT = re.compile(r"复购|至少.{0,4}(?:两|2)\s*单|下过至少")
-
-
 def _repurchase_aggregation_error(question: str, sql: str) -> str:
     """复购题的确定性聚合层级检查。
 
@@ -309,53 +328,18 @@ def _repurchase_aggregation_error(question: str, sql: str) -> str:
     正确写法必须先按 customer_id（可再带地区）分组，再在外层按地区计数。
     这类 SQL 能执行成功，靠综合器偶尔能看出来，所以这里直接判步骤不可用，避免把
     全部客户当成复购客户写进结论。
+
+    判定用 `app.semantics.is_repurchase_question`：和 `build_context` 的“复购表只给
+    复购题”共用同一份正则，避免两个模块对同一句话判出不同结论。
     """
-    q = question or ""
     low = (sql or "").lower()
-    if not _REPURCHASE_HINT.search(q) or "having" not in low:
+    if not is_repurchase_question(question) or "having" not in low:
         return ""
     before_having = low.split("having", 1)[0]
     if re.search(r"group\s+by[^)]*customer_id", before_having):
         return ""
     return ("SQL 的 HAVING 作用在地区/分组层级，统计的是分组内订单数，不是每个客户的复购；"
             "该结果不能当复购客户数使用")
-
-
-def _contract_hint(step: AnalysisStep) -> str:
-    """把 Planner 声明的语义约束拼成执行提示；只影响 SQL 生成，不改变校验/权限。"""
-    parts: list[str] = []
-    if step.metric:
-        parts.append(f"指标={step.metric}")
-    if step.dimensions:
-        parts.append("维度=" + ",".join(step.dimensions))
-    if step.grain:
-        parts.append(f"粒度={step.grain}")
-    if step.output_columns:
-        parts.append("输出列=" + ",".join(step.output_columns))
-    return "；".join(parts)
-
-
-def _column_key(name: str) -> str:
-    """列名校验的宽松归一：Planner 可能写 brand_name，SQL 实际叫 brand。"""
-    key = str(name).strip().lower().replace(" ", "_")
-    for suffix in ("_name", "_id", "_count", "_amount"):
-        if key.endswith(suffix):
-            key = key[: -len(suffix)]
-            break
-    return key
-
-
-def _output_column_warning(step: AnalysisStep, columns: list[str]) -> str:
-    """Planner 声明了输出列但 SQL 没给全时，留下可见警告，不静默通过。"""
-    if not step.output_columns:
-        return ""
-    actual = {_column_key(c) for c in columns}
-    missing = [c for c in step.output_columns if _column_key(c) not in actual]
-    if not missing:
-        return ""
-    return ("规划要求输出列 " + ",".join(step.output_columns)
-            + "，实际为 " + (",".join(columns) or "空")
-            + "，请核对分组粒度/别名")
 
 
 def execute_steps(
@@ -385,26 +369,17 @@ def execute_steps(
             question=str(spec.get("question") or ""),
             purpose=str(spec.get("purpose") or ""),
             depends_on=list(spec.get("depends_on") or []),
-            metric=str(spec.get("metric") or ""),
-            dimensions=list(spec.get("dimensions") or []),
-            grain=str(spec.get("grain") or ""),
-            output_columns=list(spec.get("output_columns") or []),
         )
         if time.monotonic() - started > total_budget_s:
             step.skipped = True
             step.error = "总预算不足，未执行"
             steps.append(step)
             continue
-        ask_question = step.question
-        extra_hint = str(spec.get("hint") or "").strip()
-        contract = _contract_hint(step)
-        if extra_hint:
-            ask_question = f"{ask_question}（{extra_hint}）"
-        if contract:
-            ask_question = f"{ask_question}（规划约束：{contract}）"
+        # 执行约束走 `ask(hint=...)` 的独立通道：问题文本保持干净，槽位/检索/形状守卫只看子问题
+        hint = str(spec.get("hint") or "").strip()
         try:
             plan_obj = ask_fn(
-                ask_question,
+                step.question,
                 catalog=catalog,
                 retriever=retriever,
                 use_llm=use_llm,
@@ -412,6 +387,7 @@ def execute_steps(
                 session=None,
                 mode="single",
                 max_repair=step_max_repair,
+                hint=hint,
             )
         except Exception as exc:  # 单步异常不能拖垮整个分析
             step.skipped = True
@@ -442,9 +418,6 @@ def execute_steps(
                 step.error = agg_error
             else:
                 step.ok = True
-                column_warning = _output_column_warning(step, plan_obj.columns)
-                if column_warning:
-                    step.warning = "；".join(x for x in (step.warning, column_warning) if x)
         else:
             step.sql = plan_obj.sql
             step.error = plan_obj.error or "执行失败"
@@ -564,6 +537,44 @@ def synthesize(
     return _attach_limitations(answer, steps), "", usage
 
 
+def _apply_share_hint(planned: PlannerOutput, question: str, catalog=None) -> None:
+    """占比题的分子/分母必须同源；这是执行约束，交给 `ask(hint=...)` 进 prompt。
+
+    文案优先取 catalog.instructions["share"]，让口径可配置；没有 catalog 时用默认文案。
+    """
+    if not is_share_question(question):
+        return
+    share_hint = (catalog.instructions.get("share") if catalog is not None else "")
+    share_hint = share_hint or DEFAULT_SHARE_INSTRUCTION
+    for spec in planned.steps:
+        spec["hint"] = share_hint
+
+
+def _needs_replan(steps: list[AnalysisStep]) -> bool:
+    """只有“所有步骤都不可用”才值得重规划；部分成功时保留第一轮结果。
+
+    曾经还有一条“所有成功步骤都违反 Planner 输出列契约”，但 Planner prompt 并不要求
+    那几个字段（强制会让拆步变差、A/B 从 1.00 掉到 0.69），真实规划器从不输出，
+    所以那条触发在生产里永远走不到——已删除，不留“测试专用分支”。
+    """
+    if not steps:
+        return False
+    return not any(step.ok for step in steps)
+
+
+def _replan_feedback(steps: list[AnalysisStep]) -> str:
+    parts: list[str] = []
+    for step in steps:
+        if not step.ok:
+            parts.append(f"[{step.id}] {step.question}: {_cell(step.error or '未执行', 80)}")
+    return "；".join(parts)[:800]
+
+
+def _step_score(steps: list[AnalysisStep]) -> int:
+    """重规划后比较用：成功步骤数越多越好，相同则保留第一轮（不白换计划）。"""
+    return sum(1 for step in steps if step.ok)
+
+
 def run_analysis(
     question: str,
     *,
@@ -576,7 +587,12 @@ def run_analysis(
     model: str | None = None,
     total_budget_s: float | None = None,
 ) -> AnalysisResult:
-    """完整分析链路；Planner 失败返回 planner_ok=False，由 agent.ask 回退单 SQL。"""
+    """完整分析链路；Planner 失败返回 planner_ok=False，由 agent.ask 回退单 SQL。
+
+    执行后若**所有步骤都不可用**，会用失败反馈重规划一次；只有第二次计划成功步骤
+    更多时才替换第一次，避免白烧一次模型。剩余预算不足一次模型调用时（`_can_replan`）
+    不重规划：保住综合阶段的时间。
+    """
     started = time.monotonic()
     budget = _total_budget() if total_budget_s is None else total_budget_s
     name = model or analysis_model()
@@ -589,12 +605,7 @@ def run_analysis(
             elapsed_ms=int((time.monotonic() - started) * 1000),
             planner_ok=False,
         )
-    # 占比题的分子/分母必须同源；这是执行约束，不依赖模型自己记得。
-    if re.search(r"占比|比例|份额|占.{0,8}(?:%|百分之)", question):
-        share_hint = ("占比口径：分子和分母必须同源；按品牌/品类拆分用 item_amount 时，"
-                      "地区总额也要用 item_amount，不能混用 pay_amount")
-        for spec in planned.steps:
-            spec["hint"] = share_hint
+    _apply_share_hint(planned, question, catalog)
     steps = execute_steps(
         planned.steps,
         ask_fn=ask_fn,
@@ -606,6 +617,32 @@ def run_analysis(
         started_at=started,
         step_max_repair=_step_repair(),
     )
+    usage = planned.usage
+    replan_note = ""
+    if _needs_replan(steps) and _can_replan(time.monotonic() - started, budget):
+        feedback = _replan_feedback(steps)
+        planned2 = plan(question, chat_fn=chat_fn, model=name, feedback=feedback)
+        usage = _merge_usage(usage, planned2.usage)
+        if planned2.error:
+            replan_note = "执行失败，重规划也失败"
+        else:
+            _apply_share_hint(planned2, question, catalog)
+            steps2 = execute_steps(
+                planned2.steps,
+                ask_fn=ask_fn,
+                catalog=catalog,
+                retriever=retriever,
+                role=role,
+                use_llm=use_llm,
+                # 重规划这一轮要留出综合模型的时间，不能把总预算用光
+                total_budget_s=max(budget - _replan_reserve(), 0.0),
+                started_at=started,
+                step_max_repair=_step_repair(),
+            )
+            if _step_score(steps2) > _step_score(steps):
+                steps = steps2
+                planned = planned2
+                replan_note = "首轮步骤全部不可用，已带失败反馈重规划一次"
     if time.monotonic() - started >= budget:
         # 预算是从 Planner 开始算的总时长；耗尽后不再开一次综合模型调用。
         # 单次模型调用仍受 ANALYSIS_TIMEOUT_S 限制，最后一次调用允许小幅超出。
@@ -621,7 +658,7 @@ def run_analysis(
         answer=answer,
         evidence=[s.id for s in steps if s.ok],
         error=synth_error,
-        warning=planned.warning,
-        usage=_merge_usage(planned.usage, synth_usage),
+        warning="；".join(x for x in (planned.warning, replan_note) if x),
+        usage=_merge_usage(usage, synth_usage),
         elapsed_ms=int((time.monotonic() - started) * 1000),
     )

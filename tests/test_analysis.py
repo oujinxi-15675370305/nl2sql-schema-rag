@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import time
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from app.agent import ScriptedGenerator, ask
@@ -20,6 +22,7 @@ from app.analysis import (
     DEFAULT_STEP_MAX_REPAIR,
     _allows_temperature,
     _analysis_endpoint,
+    _can_replan,
     _parse_json,
     _repurchase_aggregation_error,
     _sql_warning,
@@ -38,17 +41,6 @@ VALID_PLAN = json.dumps({
         {"id": "b", "question": "各地区的退款率", "purpose": "再对比退款", "depends_on": []},
     ],
     "answer_instructions": "先总量后退款率，数字都标来源",
-}, ensure_ascii=False)
-
-CONTRACT_PLAN = json.dumps({
-    "subquestions": [
-        {"id": "a", "question": "各地区的GMV", "purpose": "总量", "depends_on": [],
-         "metric": "gmv", "dimensions": ["region_name"], "grain": "region",
-         "output_columns": ["region_name", "gmv"]},
-        {"id": "b", "question": "各地区的退款率", "purpose": "退款", "depends_on": [],
-         "metric": "refund_rate", "dimensions": ["region_name"], "grain": "region",
-         "output_columns": ["region_name", "refund_rate"]},
-    ],
 }, ensure_ascii=False)
 
 
@@ -74,14 +66,6 @@ class ScriptedChat:
 
 
 class PlannerTest(unittest.TestCase):
-    def test_contract_fields_are_kept(self) -> None:
-        out = plan("各地区的GMV和退款率", chat_fn=ScriptedChat([CONTRACT_PLAN]))
-        self.assertEqual(out.error, "")
-        self.assertEqual(out.steps[0]["metric"], "gmv")
-        self.assertEqual(out.steps[0]["grain"], "region")
-        self.assertEqual(out.steps[0]["output_columns"], ["region_name", "gmv"])
-        self.assertEqual(out.steps[1]["dimensions"], ["region_name"])
-
     def test_valid_json(self) -> None:
         out = plan("各地区的GMV和退款率", chat_fn=ScriptedChat([VALID_PLAN]))
         self.assertEqual(out.error, "")
@@ -445,6 +429,56 @@ class RunAnalysisTest(unittest.TestCase):
         self.assertEqual(result.error, "")
         self.assertEqual(result.usage["prompt_tokens"], 30)
         self.assertEqual(result.usage["completion_tokens"], 13)
+        self.assertEqual(result.warning, "")
+
+    def test_replans_once_when_all_steps_fail(self) -> None:
+        counts = {"plan": 0, "ask": 0}
+
+        def chat(messages, model=None):
+            if "规划器" in messages[0]["content"]:
+                counts["plan"] += 1
+                return _reply(VALID_PLAN, prompt=10, completion=5)
+            return _reply("重规划后的结论 [s1][s2]。", prompt=20, completion=8)
+
+        def fake_ask(question, **kwargs):
+            counts["ask"] += 1
+            if counts["ask"] <= 2:
+                return SQLPlan(question=question, intent="ask", ok=False,
+                               error="first plan failed", engine="llm")
+            return SQLPlan(question=question, intent="ask", ok=True, sql="SELECT 1",
+                           columns=["n"], rows=[(1,)], engine="llm", elapsed_ms=3)
+
+        result = run_analysis(
+            "各地区的GMV和退款率", role="analyst", catalog=None,
+            ask_fn=fake_ask, chat_fn=chat,
+        )
+        self.assertEqual(counts["plan"], 2)  # 首次 + 重规划各一次
+        self.assertEqual(counts["ask"], 4)
+        self.assertEqual(result.evidence, ["s1", "s2"])
+        self.assertIn("重规划", result.warning)
+        self.assertIn("重规划后的结论", result.answer)
+        self.assertEqual(result.usage["prompt_tokens"], 40)  # 两次 Planner + 一次综合
+
+    def test_all_steps_fail_keeps_first_plan_if_replan_not_better(self) -> None:
+        plans = {"n": 0}
+
+        def fake_ask(question, **kwargs):
+            return SQLPlan(question=question, intent="ask", ok=False, error="boom")
+
+        def chat(messages, model=None):
+            if "规划器" in messages[0]["content"]:
+                plans["n"] += 1
+            return _reply(VALID_PLAN)
+
+        result = run_analysis(
+            "问题", role="analyst", catalog=None,
+            ask_fn=fake_ask, chat_fn=chat,
+        )
+        self.assertEqual(plans["n"], 2)  # 试过一次，但没变得更好
+        self.assertEqual(result.warning, "")  # 没替换计划就不提示“已重规划”
+        self.assertEqual(result.evidence, [])
+        self.assertIn("无法判断", result.answer)
+        self.assertIn("[s1]", result.answer)
 
     def test_planner_failure_sets_planner_ok_false(self) -> None:
         result = run_analysis(
@@ -454,21 +488,6 @@ class RunAnalysisTest(unittest.TestCase):
         self.assertFalse(result.planner_ok)
         self.assertEqual(result.steps, [])
         self.assertIn("规划失败", result.error)
-
-    def test_all_steps_fail_yields_cannot_judge(self) -> None:
-        def fake_ask(question, **kwargs):
-            return SQLPlan(question=question, intent="ask", ok=False, error="boom")
-
-        def chat(messages, model=None):
-            return _reply(VALID_PLAN)
-
-        result = run_analysis(
-            "问题", role="analyst", catalog=None,
-            ask_fn=fake_ask, chat_fn=chat,
-        )
-        self.assertEqual(result.evidence, [])
-        self.assertIn("无法判断", result.answer)
-        self.assertIn("[s1]", result.answer)
 
     def test_budget_exhausted_skips_steps_and_synthesis(self) -> None:
         def fake_ask(question, **kwargs):
@@ -483,6 +502,53 @@ class RunAnalysisTest(unittest.TestCase):
         self.assertTrue(all(step.skipped for step in result.steps))
         self.assertEqual(result.answer, "")
         self.assertIn("预算", result.error)
+
+    def test_replan_needs_a_model_call_of_budget_left(self) -> None:
+        # 剩余预算不够一次模型调用时不重规划：重规划会把综合阶段的时间吃光，
+        # 用户从“有结论但带局限”退化成“没有结论”。
+        with mock.patch("app.analysis._model_timeout", return_value=30.0):
+            self.assertTrue(_can_replan(0.0, 60.0))
+            self.assertTrue(_can_replan(29.0, 60.0))
+            self.assertFalse(_can_replan(31.0, 60.0))
+            self.assertFalse(_can_replan(0.0, 10.0))
+            self.assertFalse(_can_replan(0.0, -1.0))
+
+    def test_replan_skipped_when_budget_is_too_tight(self) -> None:
+        plans = {"n": 0}
+
+        def chat(messages, model=None):
+            if "规划器" in messages[0]["content"]:
+                plans["n"] += 1
+                return _reply(VALID_PLAN)
+            return _reply("结论 [s1]。", prompt=5, completion=1)
+
+        def fake_ask(question, **kwargs):
+            return SQLPlan(question=question, intent="ask", ok=False, error="boom")
+
+        with mock.patch("app.analysis._model_timeout", return_value=30.0):
+            result = run_analysis(
+                "各地区的GMV和退款率", role="analyst", catalog=None,
+                ask_fn=fake_ask, chat_fn=chat, total_budget_s=10,
+            )
+        self.assertEqual(plans["n"], 1)  # 只规划一次
+        self.assertEqual(result.warning, "")
+
+    def test_replan_execution_pass_leaves_time_for_synthesis(self) -> None:
+        budgets: list[float] = []
+
+        def fake_execute(subquestions, **kwargs):
+            budgets.append(kwargs["total_budget_s"])
+            return [AnalysisStep(id="s1", question="q", error="boom")]
+
+        with mock.patch("app.analysis.execute_steps", side_effect=fake_execute), \
+                mock.patch("app.analysis._model_timeout", return_value=30.0):
+            result = run_analysis(
+                "各地区的GMV和退款率", role="analyst", catalog=None,
+                ask_fn=lambda *a, **k: None, chat_fn=ScriptedChat([VALID_PLAN]),
+                total_budget_s=60,
+            )
+        self.assertEqual(budgets, [60, 30])  # 第二轮把 30s 留给综合
+        self.assertEqual(result.warning, "")  # 第二次没更好，不替换也不提示
 
 
 class AgentAnalysisModeTest(unittest.TestCase):
@@ -546,6 +612,20 @@ class SemanticContractTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.catalog = load_catalog()
 
+    def test_question_semantics_are_single_source(self) -> None:
+        """占比/复购判定只放在 app.semantics：两个模块不能对同一句判出不同结论。"""
+        from app.semantics import is_repurchase_question, is_share_question
+
+        self.assertTrue(is_share_question("各地区销量占全国比例"))
+        self.assertTrue(is_share_question("各品牌销售额占比"))
+        self.assertFalse(is_share_question("各地区的GMV"))
+        for question in ("复购客户数", "回头客有多少", "下过至少两单的客户数按地区",
+                         "至少两单的客户", "两单以上的客户"):
+            with self.subTest(question=question):
+                self.assertTrue(is_repurchase_question(question))
+        self.assertFalse(is_repurchase_question("有多少客户"))
+        self.assertFalse(is_repurchase_question("GMV超过3万的客户按地区统计人数"))
+
     def test_semantic_metadata_and_repurchase_table(self) -> None:
         self.assertEqual(self.catalog.metric("gmv").grain, "order")
         self.assertTrue(self.catalog.metric("gmv").additive)
@@ -555,42 +635,103 @@ class SemanticContractTest(unittest.TestCase):
         self.assertIsNotNone(table)
         self.assertEqual([c.name for c in table.columns], ["customer_id", "region_id", "order_count"])
 
-    def test_executor_passes_contract_and_warns_on_missing_column(self) -> None:
-        captured: list[str] = []
+    def test_semantic_fields_tolerate_handwritten_json(self) -> None:
+        # 口径字段是手写 JSON：字符串 "false" / null 不能被当成"可加"或渲染成 "None"
+        raw = {
+            "tables": [{"name": "t", "columns": [{"name": "c", "type": "INTEGER"}]}],
+            "metrics": [
+                {"name": "ratio", "sql": "1", "additive": "false", "grain": None,
+                 "warning": None},
+                {"name": "plain", "sql": "2"},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "catalog.json"
+            path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+            catalog = load_catalog(path)
+        self.assertFalse(catalog.metric("ratio").additive)
+        self.assertEqual(catalog.metric("ratio").grain, "")
+        self.assertEqual(catalog.metric("ratio").warning, "")
+        self.assertTrue(catalog.metric("plain").additive)
+
+    def test_executor_passes_hint_separately_from_question(self) -> None:
+        """执行约束必须走 ask(hint=...)，不能拼进子问题文本。
+
+        拼进问题会让 ask 用这句做 extract_keywords / 检索 / 形状守卫：
+        "占比口径…按品牌/品类拆分…" 会被当成新维度，同一句问题抽出不同的指标。
+        """
+        captured: list[tuple[str, dict]] = []
 
         def fake_ask(question, **kwargs):
-            captured.append(question)
-            return SQLPlan(question=question, intent="ask", ok=True,
-                           sql="SELECT r.region_name, SUM(o.pay_amount) AS gmv "
-                               "FROM orders o JOIN regions r ON r.region_id = o.region_id "
-                               "WHERE o.status = 'paid' GROUP BY r.region_name",
-                           columns=["region_name", "gmv"], rows=[("华东", 1)], engine="llm")
+            captured.append((question, kwargs))
+            return SQLPlan(question=question, intent="ask", ok=True, sql="SELECT 1",
+                           columns=["n"], rows=[(1,)], engine="llm")
 
-        steps = execute_steps(
-            [{"question": "各地区的GMV", "metric": "gmv",
-              "dimensions": ["region_name"], "grain": "region",
-              "output_columns": ["region_name", "sales"]}],
+        execute_steps(
+            [{"question": "各品牌销售额占该地区比例", "hint": "占比口径：分子分母同源"}],
             ask_fn=fake_ask, catalog=self.catalog, retriever=None, role="analyst",
         )
-        self.assertIn("规划约束", captured[0])
-        self.assertIn("指标=gmv", captured[0])
-        self.assertIn("规划要求输出列", steps[0].warning)
+        question, kwargs = captured[0]
+        self.assertEqual(question, "各品牌销售额占该地区比例")  # 问题保持干净
+        self.assertNotIn("占比口径", question)
+        self.assertEqual(kwargs["hint"], "占比口径：分子分母同源")  # 约束走独立通道
 
-    def test_executor_contract_columns_match_has_no_warning(self) -> None:
-        def fake_ask(question, **kwargs):
-            return SQLPlan(question=question, intent="ask", ok=True,
-                           sql="SELECT r.region_name, SUM(o.pay_amount) AS gmv "
-                               "FROM orders o JOIN regions r ON r.region_id = o.region_id "
-                               "WHERE o.status = 'paid' GROUP BY r.region_name",
-                           columns=["region_name", "gmv"], rows=[("华东", 1)], engine="llm")
+    def test_planner_entry_attaches_hint_to_context_not_question(self) -> None:
+        from app import agent as agent_mod
 
-        steps = execute_steps(
-            [{"question": "各地区的GMV", "metric": "gmv",
-              "dimensions": ["region_name"], "grain": "region",
-              "output_columns": ["region_name", "gmv"]}],
-            ask_fn=fake_ask, catalog=self.catalog, retriever=None, role="analyst",
-        )
-        self.assertEqual(steps[0].warning, "")
+        captured: dict = {}
+
+        def fake_llm_sql(question, ctx, catalog, feedback=None):
+            captured["question"] = question
+            captured["instructions"] = ctx.instructions
+            return "SELECT 1"
+
+        with mock.patch.object(agent_mod, "llm_sql", side_effect=fake_llm_sql):
+            plan_obj = ask("各品牌销售额占该地区比例", catalog=self.catalog,
+                           hint="占比口径：分子分母同源")
+        self.assertEqual(plan_obj.question, "各品牌销售额占该地区比例")
+        self.assertEqual(captured["question"], "各品牌销售额占该地区比例")
+        self.assertEqual(captured["instructions"], ("占比口径：分子分母同源",))
+
+    def test_instructions_block_is_omitted_when_empty(self) -> None:
+        from app.agent import _instructions_block
+        from app.domain import SchemaContext
+
+        self.assertEqual(_instructions_block(SchemaContext()), "")
+        block = _instructions_block(SchemaContext(instructions=("口径 A", "口径 B")))
+        self.assertIn("不是用户问题的一部分", block)
+        self.assertIn("- 口径 A", block)
+        self.assertIn("- 口径 B", block)
+
+    def test_conditional_rules_only_mention_tables_in_context(self) -> None:
+        """prompt 只描述本次上下文里存在的对象：复购表不在 ctx 里就不许提它。"""
+        from app.agent import _conditional_rules
+        from app.domain import Hit, SchemaContext
+
+        without = SchemaContext()
+        with_table = SchemaContext(tables=[Hit(kind="table", key="repurchase_customers",
+                                              score=0.0, payload={})])
+
+        # 普通问题 + 表没进上下文：不提复购表
+        self.assertNotIn("repurchase_customers", _conditional_rules("各地区的GMV", without))
+        # 表在上下文里：才提
+        self.assertIn("repurchase_customers",
+                      _conditional_rules("各地区的GMV", with_table))
+        # 占比规则只看问题
+        self.assertIn("份额/占比", _conditional_rules("各地区销量占全国比例", without))
+        self.assertNotIn("份额/占比", _conditional_rules("各地区的GMV", without))
+
+    def test_replans_only_when_no_step_is_usable(self) -> None:
+        from app.analysis import _needs_replan
+
+        self.assertFalse(_needs_replan([]))
+        self.assertTrue(_needs_replan([AnalysisStep(id="s1", question="q", error="boom"),
+                                       AnalysisStep(id="s2", question="q", skipped=True)]))
+        self.assertFalse(_needs_replan([AnalysisStep(id="s1", question="q", ok=True),
+                                        AnalysisStep(id="s2", question="q", error="boom")]))
+        # 全部成功（哪怕带口径警告）也不重规划：计划能用，不该白烧一次
+        self.assertFalse(_needs_replan([AnalysisStep(id="s1", question="q", ok=True,
+                                                     warning="口径警告")]))
 
 
 if __name__ == "__main__":

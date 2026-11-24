@@ -32,7 +32,7 @@
 | 回答形态 | SQL + 结果 + 中文结论 + trace | SQL + 结果表；可选分析模式（`mode=analysis`）给步骤 + 引用 `[sN]` 的结论；可选自动结论（`conclusion=true`，1–3 句、只描述结果） |
 | 记忆 | 会话 4 轮 + 长期偏好（文件/Redis） | 会话 5 轮、槽位继承（进程内存） |
 | 接口 | FastAPI + CLI + Streamlit + MCP | HTTP + 原生 JS 页面 |
-| 测试 | 141 个（不碰模型） | 266 个（不碰模型，含 HTTP 契约、分析/holdout/自动结论/A-B 覆盖率） |
+| 测试 | 141 个（不碰模型） | 280 个（不碰模型，含 HTTP 契约、分析/holdout/自动结论/A-B 覆盖率） |
 | 运行时依赖 | LangGraph、sqlglot、FastAPI、Streamlit 等 | **零运行时依赖（标准库）** |
 | 评测 | 自建 60 + DuSQL 100 + BIRD mini 30/55 | 自建 57+21 + hard 10 + complex 13；无公开集分数 |
 | 作者自报准确率 | qwen-plus：自建 79.6/98.0、DuSQL 48.0/68.0；qwen2.5:7b：自建 63.3/93.9、BIRD mini 40.0/76.7（严格/宽松） | deepseek-chat：自建 50/50、多轮 21/21、hard 8–9/10、complex 最新 3 次 12/11/12（C9 偶发；不当硬门槛）；无公开集分数 |

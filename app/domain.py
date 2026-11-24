@@ -59,6 +59,7 @@ class Catalog:
     tables: tuple[Table, ...]
     metrics: tuple[Metric, ...]
     relations: tuple[tuple[str, str], ...] = ()
+    instructions: dict[str, str] = field(default_factory=dict)
 
     def table(self, name: str) -> Table | None:
         return next((t for t in self.tables if t.name == name), None)
@@ -84,6 +85,9 @@ class SchemaContext:
     metrics: list[Hit] = field(default_factory=list)
     tables: list[Hit] = field(default_factory=list)
     columns: list[Hit] = field(default_factory=list)
+    # 执行约束（份额口径、规划约束等）：只进 SQL prompt，**不进问题文本**。
+    # 拼进问题会污染槽位抽取/检索/形状守卫，见 `agent.ask(hint=...)`。
+    instructions: tuple[str, ...] = ()
 
     def table_names(self) -> list[str]:
         return [h.key for h in self.tables]
@@ -170,11 +174,6 @@ class AnalysisStep:
     intent: str = ""
     engine: str = ""
     elapsed_ms: int = 0
-    # Planner 契约：由 Planner 声明的指标/维度/粒度/输出列；只用于执行提示与校验。
-    metric: str = ""
-    dimensions: list[str] = field(default_factory=list)
-    grain: str = ""
-    output_columns: list[str] = field(default_factory=list)
 
 
 @dataclass

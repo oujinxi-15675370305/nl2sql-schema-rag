@@ -210,6 +210,51 @@ class SqlShapeGuardTest(unittest.TestCase):
         question = "今年每个月的GMV和环比（(当月-前一个月)/前一个月，保留4位小数）"
         self.assertEqual(_shape_feedback(sql, {}, question), "")
 
+    def test_time_ranges_are_not_grouped_top_n(self) -> None:
+        # “前10个月/前180天”是时间范围；旧正则只看数字后一位，会把 10 当成 1 +
+        # “0个月”，于是把“各品类前10个月的销量”误判成分组 Top-N，逼模型改成
+        # “每月前 10 名品类”——语义完全变了，这里钉死不能复发。
+        sql = ("SELECT substr(o.order_date,1,7) AS month, p.category, SUM(i.quantity) AS units "
+               "FROM orders o JOIN order_items i ON i.order_id = o.order_id "
+               "JOIN products p ON p.product_id = i.product_id "
+               "WHERE o.status = 'paid' GROUP BY month, p.category")
+        for question in (
+            "各品类前10个月的销量",
+            "各品类前180天的销量",
+            "各品类前3个月的销量",
+            "各品类前3个季度的销量",
+            "每个地区前2年的GMV",
+            "各地区最近30天的GMV",
+        ):
+            with self.subTest(question=question):
+                self.assertEqual(_shape_feedback(sql, {}, question), "")
+
+    def test_multi_digit_grouped_top_n_still_guarded(self) -> None:
+        # 修掉时间单位的误判后，真正的“前 N 名”仍要拦：多位数、中文数字、带空格
+        sql = ("SELECT p.brand, p.product_name, SUM(o.pay_amount) AS gmv FROM orders o "
+               "JOIN order_items i ON i.order_id = o.order_id "
+               "JOIN products p ON p.product_id = i.product_id "
+               "WHERE o.status = 'paid' GROUP BY p.brand, p.product_name "
+               "ORDER BY gmv DESC LIMIT 10")
+        for question in ("各品类前12名商品", "每个品类前 3 名商品", "按销售额前3的品牌"):
+            with self.subTest(question=question):
+                self.assertIn("分组内", _shape_feedback(sql, {}, question))
+
+    def test_share_question_requires_ratio(self) -> None:
+        bad = ("SELECT r.region_name, SUM(o.pay_amount) AS gmv FROM orders o "
+               "JOIN regions r ON r.region_id = o.region_id "
+               "WHERE o.status = 'paid' GROUP BY r.region_name")
+        good = ("SELECT r.region_name, ROUND(SUM(o.pay_amount) * 1.0 / "
+                "SUM(SUM(o.pay_amount)) OVER (), 4) AS share FROM orders o "
+                "JOIN regions r ON r.region_id = o.region_id "
+                "WHERE o.status = 'paid' GROUP BY r.region_name")
+        plan = ask("各地区GMV占全国比例", catalog=self.catalog,
+                   generator=ScriptedGenerator([bad, good]), max_repair=1)
+        self.assertTrue(plan.ok, plan.error)
+        self.assertEqual(len(plan.attempts), 2)
+        self.assertIn("占比", plan.attempts[0]["error"])
+        self.assertIn("/", plan.sql)
+
     def test_extra_filter_column_triggers_rewrite(self) -> None:
         bad = (
             "SELECT r.region_name, ROUND(SUM(o.pay_amount), 2) AS gmv "
@@ -250,11 +295,35 @@ class PromptContextTest(unittest.TestCase):
         cls.catalog = load_catalog()
         cls.retriever = SchemaRetriever(cls.catalog)
 
+    def test_catalog_instructions_are_loaded(self) -> None:
+        self.assertIn("同源", self.catalog.instructions["share"])
+        self.assertIn("repurchase_customers", self.catalog.instructions["repurchase"])
+        # grain 边界要写清两条口径：拆品类走明细；GMV 阈值不要 join 明细（会重复计入）
+        repurchase = self.catalog.instructions["repurchase"]
+        self.assertIn("order_items", repurchase)
+        self.assertIn("重复计入", repurchase)
+
     def test_repurchase_table_only_for_repurchase_queries(self) -> None:
         normal, _ = build_context("有多少客户", self.catalog, self.retriever)
         self.assertNotIn("repurchase_customers", [h.key for h in normal.tables])
-        repeat, _ = build_context("复购客户数", self.catalog, self.retriever)
-        self.assertIn("repurchase_customers", [h.key for h in repeat.tables])
+        for question in ("复购客户数", "下过至少两单的客户数按地区", "买过两次的客户"):
+            repeat, _ = build_context(question, self.catalog, self.retriever)
+            self.assertIn("repurchase_customers", [h.key for h in repeat.tables], question)
+
+    def test_repurchase_table_not_forced_when_catalog_lacks_it(self) -> None:
+        # 表不在当前 catalog 里时不能把名字塞进 ctx：prompt 会提到 DDL 里没有的表（AC-9.8）
+        from app.domain import Catalog
+
+        trimmed = Catalog(
+            tables=tuple(t for t in self.catalog.tables if t.name != "repurchase_customers"),
+            metrics=self.catalog.metrics,
+            relations=self.catalog.relations,
+            instructions=self.catalog.instructions,
+        )
+        ctx, _ = build_context("下过至少两单的客户数按地区", trimmed,
+                               SchemaRetriever(trimmed))
+        self.assertNotIn("repurchase_customers", ctx.table_names())
+        self.assertNotIn("repurchase_customers", ctx.ddl(trimmed))
 
     def test_ddl_includes_join_keys_and_relations(self) -> None:
         ctx, _ = build_context("各地区的销量", self.catalog, self.retriever)

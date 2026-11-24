@@ -7,6 +7,10 @@
     ["repurchase_customers.customer_id", "customers.customer_id"],
     ["repurchase_customers.region_id", "regions.region_id"]
   ],
+  "instructions": {
+    "share": "本次是份额/占比问题：分子和分母必须同源。品牌/品类销售额用可加的行级口径（SUM(i.item_amount) 或按明细分摊整单金额），地区总额也用同一口径；不要用整单 pay_amount 当分母去配 item_amount 分子。",
+    "repurchase": "复购客户可以直接查 repurchase_customers（customer_id, region_id, order_count），用客户所属地区，不要按订单地区拆客户。这张表只有客户/地区/订单数：按品类/品牌/商品拆要回 orders + order_items + products 明细聚合；按 GMV/金额阈值筛只用 orders 的整单 pay_amount（按 customer_id 聚合后 HAVING），不要 join order_items——整单金额会被明细行重复计入。"
+  },
   "tables": [
     {
       "name": "orders",
@@ -59,7 +63,9 @@
     {
       "name": "repurchase_customers",
       "comment": "复购客户（已支付订单数 >= 2），一行一个客户；按客户所属地区统计",
-      "synonyms": ["复购客户", "复购", "回头客", "复购名单", "复购客户数"],
+      "synonyms": ["复购客户", "复购", "回头客", "复购名单", "复购客户数",
+                   "下过至少两单", "下过至少2单", "至少两单", "至少2单",
+                   "两单以上", "2单以上", "买过两次", "多次购买"],
       "columns": [
         {"name": "customer_id", "type": "TEXT", "comment": "客户编号", "is_dimension": true},
         {"name": "region_id", "type": "INTEGER", "comment": "客户所属地区编号", "is_dimension": true},

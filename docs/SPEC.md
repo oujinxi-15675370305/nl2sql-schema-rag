@@ -126,10 +126,12 @@
 - **AC-7.1**：`ask(..., mode="single" | "analysis")` 默认 `single`，快路径的 SQL/结果字段不变；
   Step 3 额外增加的 `answer / conclusion` 见 AC-8.1；
   `POST /api/ask` 增加 `mode`（未知值 400）。analysis 响应在原有字段外增加
-  `mode / steps / answer / evidence`，step 含 `question / purpose / sql / columns / rows /
-  row_count / ok / skipped / error / engine / elapsed_ms`。
+  `mode / steps / answer / evidence / analysis_warning`，
+  step 含 `question / purpose / sql / columns / rows / row_count / ok / skipped / error /
+  warning / engine / elapsed_ms`。
 - **AC-7.2**：Planner 只接收改写后的问句（不带 schema），输出 2–4 个自包含子问题的 JSON；
   坏 JSON/空步骤重试 1 次，仍失败回退 `single` 并带 `analysis_error`；步数上限 4，超出截断。
+  重规划时多收一段上一轮失败反馈（见 AC-9.6），仍不含 schema。
 - **AC-7.3**：Executor 每步复用 `ask(mode="single")`，同 role、不共享 session；澄清/越权/
   预算不足标 `skipped` 不硬跑；失败步骤保留 sql/error，不隐藏；SQL 仍走校验/权限/只读/5s 超时。
   聚合层级与子问题不一致的步骤（典型：复购题的 `HAVING` 落在地区分组、返回地区全部客户）
@@ -143,7 +145,9 @@
   不换默认模型。测试不碰真实模型；基础 50/50、多轮 21/21、hard/complex 数字不得回退。
   complex 以 prompt v3.1 + 复购/阈值客户规则后的样本为准：曾 5 次 **12/12**；加入语义层/形状守卫后最新 3 次 **12/12、11/12、12/12**（C9 偶发）。v3 的 12/12 含 4 条与题面重叠的示例，不作为回退基准；12/12 也不当泛化硬门槛。
   A/B 旧 8/12、10/12 是单次人工抽样且无原始产物，只作历史参考；复核重跑并落盘
-  `eval/analysis_ab.json`（chat 26/26 步、5.98s、coverage 1.00；flash 25/26 步、19.2s、coverage 0.88），
+  `eval/analysis_ab.json`（语义层/形状守卫一轮：chat 26/26 步、5.98s、coverage 1.00；flash 25/26 步、19.2s、coverage 0.88；
+  删契约 + 独立 hint 通道后两轮：chat 26/26 & 25/26 步、coverage 0.94 & 0.92；flash 24/25 & 25/26 步、coverage 0.92 & 0.75；
+  份额题 C4/C11 两轮都是 2/2 步、1.00，波动集中在 C1/C6/C9/C13 的偶发），
   单轮 coverage 不作为稳定质量门槛；C8 旧 coverage 0.7692 是 `answer_numbers()` 不识别 U+2212，
   修复后 C8=1.0。
 
@@ -165,10 +169,15 @@
 ### M9 语义层与 Planner 契约（P1，起步）
 
 - **AC-9.1**：指标带 `additive / grain / warning`；`gmv` 是 order 粒度且可加，但按品牌/品类拆分需行级分摊；`aov/refund_rate/customer_count` 标为不可加。
-- **AC-9.2**：新增 `repurchase_customers` 语义表（客户所属地区 + 已支付订单数），只在“复购/回头客”问题里检索；普通客户问题不得被它挤占。
-- **AC-9.3**：问题要求“每个分组前 N”但 SQL 只有全局 `LIMIT` 时，形状守卫按一次校验失败重写；用 `ROW_NUMBER() OVER (PARTITION BY ...)` 修复。
-- **AC-9.4**：Planner 的 `metric/dimensions/grain/output_columns` 可解析、执行后校验输出列；但**不强制写进 Planner prompt**——强制会改变拆步、使 chat A/B 从 1.00 掉到 0.69，先保留解析/校验，不拿它当硬约束。
+- **AC-9.2**：新增 `repurchase_customers` 语义表（客户所属地区 + 已支付订单数），只在“复购/回头客/下过至少两单/买过两次”问题里作为 required 表进入上下文；普通客户问题不得被它挤占。该表只有 customer/region/order_count：按品类/品牌/商品拆要回 `orders + order_items + products` 明细聚合；按 GMV 阈值筛只用 `orders` 的整单 `pay_amount`（按客户聚合后 HAVING），**不得 join `order_items`**（整单金额会按明细行重复计入）。
+- **AC-9.3**：问题要求“每个分组前 N”但 SQL 只有全局 `LIMIT` 时，形状守卫按一次校验失败重写；用 `ROW_NUMBER() OVER (PARTITION BY ...)` 修复。N 后面紧跟时间单位（前 3 个月 / 前 10 个月 / 前 180 天 / 前 2 年）是**时间范围不是 Top-N**，不得触发守卫。
+- **AC-9.4**：Planner 契约字段（`metric/dimensions/grain/output_columns`）**已删除**。Planner prompt 不要求这些字段（实测强制会改变拆步、chat A/B 从 1.00 掉到 0.69），真实规划器从不输出，留着只产生 30+ 行死代码和"只有测试会走到"的假绿分支。口径正确性改由确定性守卫承担：Top-N 形状守卫（AC-9.3）、复购 HAVING 聚合层级、`_sql_warning` 不可加提示。
 - **AC-9.5**：页面表头做中文映射（`quarter → 季度`、`gmv → 销售额` 等），SQL 列名契约不变。
+- **AC-9.6**：首次执行后**所有步骤都不可用**时，带失败反馈重规划一次；只有第二次成功步骤更多才替换，最多重规划一次，预算从 Planner 开始计时；重规划时 Planner 收到的只有失败步骤的错误文本，**不含 schema、行数据或隐藏列**。剩余预算不足一次模型调用（`ANALYSIS_TIMEOUT_S`）时不重规划，重规划那一轮的步骤执行也给综合阶段预留同样的时间——不能把综合预算吃光、把“有结论但带局限”退化成“没有结论”。
+- **AC-9.7**：执行约束（份额口径等）走 `ask(hint=...)` → `SchemaContext.instructions` 的独立 prompt 段，**不拼进问题文本**；问题文本保持干净，`extract_keywords` / 检索 / 形状守卫只看用户问题。
+- **AC-9.8**：prompt 只描述本次上下文里真实存在的对象：复购表不在 `ctx.table_names()` 时，prompt 不得提到 `repurchase_customers`。占比/复购判定只放在 `app/semantics.py`，`agent` 与 `analysis` 共用同一份正则。
+- **AC-9.9**：占比/份额题生成的 SQL 必须包含除法（分子/分母）；没有比值列时按一次校验失败重写，避免只返回原始指标。
+- **AC-9.10**：份额/复购的提示文案来自 `catalog.instructions`，`agent` 与 `analysis` 共用；catalog 缺失时退回 `app/semantics.py` 的默认文案，避免两处各写一套。
 
 ## 4. 契约（公开接口，改动需改本文件）
 
@@ -176,9 +185,11 @@
 # app/agent.py
 ask(question: str, *, catalog=None, retriever=None, generator=None,
     use_llm: bool = True, max_repair: int = 2, session=None,
-    role: str = "analyst", mode: str = "single", conclusion: bool = False) -> SQLPlan
+    role: str = "analyst", mode: str = "single", conclusion: bool = False,
+    hint: str = "") -> SQLPlan
 # M3 已加：session=None（app/session.py 的 Session）
 # M4 已加：role（analyst / viewer；未知角色抛 ValueError，HTTP 层 400）
+# M9 已加：hint = 执行约束，只进 SQL prompt（SchemaContext.instructions），不进问题文本（AC-9.7）
 
 # app/router.py（M3：槽位由调用方算好传进来，classify 不再自己抽取 —— AC-3.6）
 classify(question: str, catalog: Catalog, slots: dict[str, list[str]],
@@ -252,8 +263,9 @@ GET /api/health → { ok, tables, metrics, roles }
 | LLM 主线化 / 规则 fallback（2026-11-20） | ✅ 已完成 | 规则 SQL 移到 `app/fallback.py`（`OfflineFallback`，离线降级 + CI 基线），`agent.py` 只留 LLM/校验/执行/重试；新增 `eval/hard_cases.json` 10 条与 `--hard` runner（单独统计、不进 CI）；README/SPEC/decisions 改成模型主线；166 测试全绿，CI 仍只跑 `--engine rule` |
 | 页面离线基线 / 模型快照（2026-11-21） | ✅ 已完成 | 按钮改「跑离线基线」；`scripts/record_llm_eval.py` 生成 `eval/llm_result.json`（只读快照），`GET /api/eval/llm/last` 有则显示「上次模型评测」、无/损坏则隐藏；接口与测试均不调模型；BIRD/Spider/DuSQL 仅方案评估、不接；180 单测 |
 | 复杂问法评测（2026-11-22） | ✅ 已完成 | 13 条（12 可判定 + 1 归因未支持），`--complex` 单独统计、不进 CI；规则 0/12、`deepseek-chat` 曾 5 次 12/12，语义层后最新 3 次 12/11/12（C9 偶发；不当硬门槛）、回退 0；分组 GMV 口径见 README |
-| 分析模式 MVP（2026-11-23） | ✅ 已完成 | `mode=analysis` 默认关闭；Planner 2–4 步 → 每步复用 `ask` → Synthesizer 引用 `[sN]`、失败/口径警告补“局限”；266 单测；每步重试默认 1、总预算从 Planner 计时；复购错误 HAVING 判步骤不可用；prompt v3.1 复杂单 SQL 最新 3 次 12/11/12，holdout 3/3×3；A/B 旧 8/12、10/12 仅历史，复核重跑 raw：chat 26/26 步/5.98s/coverage 1.00，flash 25/26 步/19.2s/coverage 0.88（`eval/analysis_ab.json`），默认不换模型；#6/#12 整单 pay_amount 按明细拆分不可加总，已加确定性警告 |
-| 自动结论 Step 3（2026-11-23） | ✅ 已完成 | `conclusion=true` 显式开启、默认关闭；只对 LLM 成功单 SQL 多调一次模型；只描述结果、不解释原因；规则/空结果/失败不调；多轮用改写问句；非布尔 400；分析模式不叠加；页面开关默认关；实测 1.5–1.9s；266 单测 |
+| 分析模式 MVP（2026-11-23） | ✅ 已完成 | `mode=analysis` 默认关闭；Planner 2–4 步 → 每步复用 `ask` → Synthesizer 引用 `[sN]`、失败/口径警告补“局限”；280 单测；每步重试默认 1、总预算从 Planner 计时；复购错误 HAVING 判步骤不可用；prompt v3.1 复杂单 SQL 最新 3 次 12/11/12，holdout 3/3×3；A/B 旧 8/12、10/12 仅历史，复核重跑 raw：chat 26/26 步/5.98s/coverage 1.00，flash 25/26 步/19.2s/coverage 0.88（`eval/analysis_ab.json`），默认不换模型；#6/#12 整单 pay_amount 按明细拆分不可加总，已加确定性警告 |
+| 语义层清理（2026-11-24） | ✅ 已完成 | 删 Planner 契约死代码（`metric/dimensions/grain/output_columns`、输出列警告、第二条重规划触发）；执行约束改走 `ask(hint=...)` → `SchemaContext.instructions` 独立 prompt 段；复购表 prompt 只在表进上下文时拼；`app/semantics.py` 收口占比/复购判定；`id_map` 只映射保留步骤；删 `analysis_replanned`；280 单测；A/B 两轮 chat 26/26 & 25/26 步、flash 24/25 & 25/26 步，份额题 C4/C11 恒 2/2 + 1.00 |
+| 自动结论 Step 3（2026-11-23） | ✅ 已完成 | `conclusion=true` 显式开启、默认关闭；只对 LLM 成功单 SQL 多调一次模型；只描述结果、不解释原因；规则/空结果/失败不调；多轮用改写问句；非布尔 400；分析模式不叠加；页面开关默认关；实测 1.5–1.9s；280 单测 |
 
 ## 8. 开发约定
 

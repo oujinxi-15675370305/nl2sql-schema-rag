@@ -63,6 +63,12 @@ class RoleCatalogTest(unittest.TestCase):
             self.assertIn(term, terms)
         self.assertEqual(denied_terms(self.catalog, ANALYST), ())  # analyst 不拦
 
+    def test_visible_catalog_keeps_instructions(self) -> None:
+        # visible_catalog 是手工构造 Catalog：新增字段忘了透传就会悄悄丢（口径文案会退回默认）
+        self.assertEqual(visible_catalog(self.catalog, VIEWER).instructions,
+                         self.catalog.instructions)
+        self.assertTrue(visible_catalog(self.catalog, ANALYST).instructions)
+
     def test_unknown_role_is_rejected(self) -> None:
         # 反向用例：未知角色不静默降级成 analyst
         with self.assertRaises(ValueError):

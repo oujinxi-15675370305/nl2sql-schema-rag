@@ -69,7 +69,7 @@ def visible_catalog(catalog: Catalog, role: str = DEFAULT_ROLE) -> Catalog:
         for metric in catalog.metrics
         if not any(part.split(".")[-1] in hidden for part in metric.requires)
     )
-    return Catalog(tables=tables, metrics=metrics)
+    return Catalog(tables=tables, metrics=metrics, instructions=dict(catalog.instructions))
 
 
 def denied_terms(catalog: Catalog, role: str) -> tuple[str, ...]:

@@ -21,6 +21,12 @@ from app.domain import Catalog, Hit, SchemaContext, SQLPlan
 from app.fallback import OfflineFallback
 from app.retrieval import SchemaRetriever
 from app.router import classify, reply_for
+from app.semantics import (
+    DEFAULT_REPURCHASE_INSTRUCTION,
+    DEFAULT_SHARE_INSTRUCTION,
+    is_repurchase_question,
+    is_share_question,
+)
 from app.session import Session, inherit_slots, rewrite_question
 from app.slots import extract_keywords
 
@@ -69,11 +75,16 @@ def build_context(
     """`keywords` 传了就用它（M3 里是继承后的槽位），避免再抽一遍。"""
     slots = keywords if keywords is not None else extract_keywords(question, catalog)
     metrics, tables, columns = retriever.retrieve(question)
-    # 复购表只服务复购问题；否则“有多少客户”会被它挤进上下文，模型可能直接数全量客户
-    if not re.search(r"复购|回头客", question):
+    # 复购表只服务复购/阈值客户问题；否则“有多少客户”会被它挤进上下文，模型可能直接数全量客户
+    if not is_repurchase_question(question):
         tables = [h for h in tables if h.key != "repurchase_customers"]
         columns = [h for h in columns if h.payload.get("table") != "repurchase_customers"]
     required = _required_tables(catalog, slots)
+    if is_repurchase_question(question) and catalog.table("repurchase_customers"):
+        # 复购题必须有这张语义表；不能只指望检索的同义词命中。
+        # 仍要过 catalog.table()：表不在当前 catalog 里时不能把名字塞进 ctx，
+        # 否则 prompt 会提到 DDL 里没有的表（AC-9.8 修的就是这个幻觉）。
+        required = list(dict.fromkeys([*required, "repurchase_customers"]))
     held = {h.key for h in tables}
     for name in required:
         if name in held:
@@ -98,6 +109,16 @@ def build_context(
 # 筛选槽位对应的输出列：只换筛选条件时，这些列不该出现在 SELECT 里
 FILTER_COLUMNS = {"region": "region_name", "category": "category"}
 
+# “每个分组前 N 名”：N 后面紧跟时间单位时是时间范围，不是 Top-N
+# （“各品类前 10 个月”= 最近 10 个月，不是每个品类的前 10 名）。
+# `[0-9]+(?![0-9])` 阻止把 “10 个月” 退化成 “1” + “0 个月” 再误判。
+GROUPED_TOP_N = re.compile(
+    r"(?:每个|各|按).{0,20}(?:前|top)\s*(?:[0-9]+(?![0-9])|[一二三四五六七八九十两]+)\s*"
+    r"(?!个?\s*(?:月|天|日|周|年|季|小时|分钟))",
+    re.I,
+)
+WINDOW_FN = re.compile(r"\b(?:row_number|rank|dense_rank)\s*\(", re.I)
+
 
 def _shape_feedback(sql: str, slots: dict, question: str = "") -> str:
     """生成后的语义形状检查：筛选条件必须保留；只换筛选时不要 SELECT 筛选列。
@@ -107,11 +128,13 @@ def _shape_feedback(sql: str, slots: dict, question: str = "") -> str:
     只对 `filter` 槽位和“每个分组内 Top-N”生效；无筛选/普通排名的问题不受影响。
     """
     low = sql.lower()
-    if re.search(r"(?:每个|各|按).{0,20}(?:前|top)\s*[0-9一二三四五六七八九十两](?!\s*个?\s*月)", question, re.I) \
-            and not re.search(r"\b(?:row_number|rank|dense_rank)\s*\(", low):
+    if GROUPED_TOP_N.search(question) and not WINDOW_FN.search(low):
         return ("问题要求每个分组内的 Top-N，当前 SQL 只有全局排序/LIMIT；"
                 "请用 WITH + ROW_NUMBER() OVER (PARTITION BY 分组列 ORDER BY 指标 DESC) "
                 "筛 rn <= N 后再输出。")
+    if is_share_question(question) and "/" not in sql:
+        return ("占比/份额题必须输出比值列（分子/分母），且分子分母同源；"
+                "当前 SQL 没有除法，只返回了原始指标。请改写为 share = 分子 / 分母。")
     filters = slots.get("filter", [])
     if not filters:
         return ""
@@ -135,6 +158,36 @@ def _shape_feedback(sql: str, slots: dict, question: str = "") -> str:
 
 
 # ---------- SQL 生成（LLM 主线；规则在 app/fallback.py） ----------
+def _instructions_block(ctx: SchemaContext) -> str:
+    """把执行约束渲染成独立 prompt 段；没有就整段省略。
+
+    hint 走这里而不是拼进问题文本：问题要留给 `extract_keywords` / 检索 / 形状守卫，
+    拼进去会让"占比口径：按品牌/品类拆分…"这类提示被当成新维度，改变检索到的指标，
+    还会让"只换筛选不要 SELECT 筛选列"的守卫因为 dimension 非空而跳过。
+    """
+    lines = [f"- {text}" for text in ctx.instructions if text]
+    if not lines:
+        return ""
+    return "执行约束（只影响 SQL 生成，不是用户问题的一部分）：\n" + "\n".join(lines) + "\n\n"
+
+
+def _conditional_rules(question: str, ctx: SchemaContext, catalog: Catalog | None = None) -> str:
+    """按“本次上下文里真实存在的东西”拼口径规则；不存在的表/场景一个字都不提。
+
+    文案从 catalog 的 `instructions` 取，改口径不用改代码；catalog 缺失时退回
+    `app.semantics` 的默认文案。静态 prompt 说“可以直接查 repurchase_customers”
+    是幻觉源：复购表只在复购/阈值客户问题里进上下文。
+    """
+    rules: list[str] = []
+    if is_share_question(question):
+        text = catalog.instructions.get("share", DEFAULT_SHARE_INSTRUCTION) if catalog else DEFAULT_SHARE_INSTRUCTION
+        rules.append(f"- {text}\n")
+    if "repurchase_customers" in ctx.table_names():
+        text = catalog.instructions.get("repurchase", DEFAULT_REPURCHASE_INSTRUCTION) if catalog else DEFAULT_REPURCHASE_INSTRUCTION
+        rules.append(f"- {text}\n")
+    return "".join(rules)
+
+
 def llm_sql(
     question: str, ctx: SchemaContext, catalog: Catalog, feedback: str | None = None
 ) -> str | None:
@@ -147,7 +200,9 @@ def llm_sql(
     prompt = (
         "你是数据仓库的 SQL 生成器。只能使用下面给出的表和列，禁止编造字段或 JOIN 条件。\n"
         f"可用 schema：\n{ctx.ddl(catalog)}\n\n"
+        f"{_instructions_block(ctx)}"
         "口径与格式（必须遵守）：\n"
+        f"{_conditional_rules(question, ctx, catalog)}"
         "- 只输出一条 SELECT 语句（复杂问题可以用 WITH ... SELECT 的 CTE），不要解释，不要 markdown。\n"
         "- 指标口径以 schema 里给出的 metric SQL 为准。\n"
         "- GMV/成交额/销售额的金额列只能来自已支付订单：必须用 WHERE o.status = 'paid'，"
@@ -172,8 +227,7 @@ def llm_sql(
         "- 复购/阈值客户统计（如“下过至少两单的客户数”或“GMV超过某值的客户按地区统计人数”）："
         "先在子查询按 customer_id 聚合 + HAVING（订单数 >= 2 或 SUM(pay_amount) > 阈值），"
         "再在外层按地区 COUNT(DISTINCT customer_id)；不要按 customer_id + 地区分组返回客户明细，"
-        "也不要把 HAVING 套在地区汇总上。复购客户也可以直接查 repurchase_customers"
-        "（customer_id, region_id, order_count），用客户所属地区，不要按订单地区拆客户。\n"
+        "也不要把 HAVING 套在地区汇总上。\n"
         "- 如果问题只问「有哪些 / 列出」某个维度、没有指标：用 SELECT DISTINCT 只选该维度列，"
         "不要臆造指标，也不要 GROUP BY。\n"
         "- 有指标的问题必须 SELECT 指标列（可以再带分组维度），不要只返回维度取值。\n"
@@ -378,6 +432,7 @@ def ask(
     role: str = permissions.DEFAULT_ROLE,
     mode: str = "single",
     conclusion: bool = False,
+    hint: str = "",
 ) -> SQLPlan:
     """AC-1.1：失败带报错重试；AC-1.4：每次尝试都要过校验；AC-1.5：max_repair=0 只跑一次。
 
@@ -385,6 +440,10 @@ def ask(
     回退本函数的单 SQL 快路径，并把原因放进 `analysis_error`；默认 `mode="single"`，结构不变。
     `conclusion=True` 时，单 SQL 成功后再可选调用一次模型写 1–3 句结论（Step 3，默认关闭）；
     结论失败只写 `conclusion_error`，不影响 SQL 的 `ok/rows`。
+
+    `hint` 是执行约束（份额口径、规划约束）：**只进 SQL prompt，不进问题文本**。
+    拼进问题会污染槽位抽取、检索和形状守卫（实测会多抽一个 dimension、把指标从
+    order_count 换成 refund_rate），所以走 `SchemaContext.instructions` 独立通道。
 
     顺序（AC-3.6）：
     **role → 按角色裁剪 catalog → session 槽位继承 → classify → 检索/build_context → 生成**。
@@ -438,6 +497,9 @@ def ask(
 
     # 只有问数才检索，且检索用的是裁剪后的 catalog（AC-4.1）
     ctx, keywords = build_context(rewritten, catalog, retriever, keywords=slots)
+    if hint:
+        # 执行约束走 context 的独立通道：问题文本保持干净，槽位/检索/形状守卫只看用户问题
+        ctx.instructions = (*ctx.instructions, hint)
     plan.context = ctx
     plan.keywords = keywords
 
